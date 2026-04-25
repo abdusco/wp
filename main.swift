@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import CoreImage
+import Metal
 import Network
 
 // MARK: - Image collection
@@ -108,8 +109,12 @@ class WallpaperController: NSObject {
 
     var activeImages: [URL] { shuffleEnabled ? shuffledImages : images }
 
-    // One shared GPU-backed context for all blur operations
-    lazy var ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    lazy var ciContext: CIContext = {
+        if let device = MTLCreateSystemDefaultDevice() {
+            return CIContext(mtlDevice: device)
+        }
+        return CIContext(options: [.useSoftwareRenderer: false])
+    }()
 
     init(images: [URL]) {
         self.images = images
