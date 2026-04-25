@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import CoreImage
+import Network
 
 // MARK: - Image collection
 
@@ -29,6 +30,66 @@ func collectImages(from paths: [String]) -> [URL] {
     return result
 }
 
+// MARK: - HTTP Server
+
+final class HTTPServer {
+    private let port: UInt16
+    private let onNext: () -> Void
+    private let onPrev: () -> Void
+    private let onBlur: () -> Void
+    private var listener: NWListener?
+
+    init(port: UInt16, onNext: @escaping () -> Void, onPrev: @escaping () -> Void, onBlur: @escaping () -> Void) {
+        self.port = port
+        self.onNext = onNext
+        self.onPrev = onPrev
+        self.onBlur = onBlur
+    }
+
+    func start() {
+        do {
+            listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: port)!)
+        } catch {
+            fputs("wp: http: \(error)\n", stderr)
+            return
+        }
+
+        listener?.stateUpdateHandler = { [port] state in
+            if case .ready = state { fputs("wp: http listening on :\(port)\n", stderr) }
+            if case .failed(let err) = state { fputs("wp: http: \(err)\n", stderr) }
+        }
+
+        listener?.newConnectionHandler = { [weak self] conn in
+            conn.start(queue: .global(qos: .background))
+            self?.handle(conn)
+        }
+
+        listener?.start(queue: .global(qos: .background))
+    }
+
+    private func handle(_ conn: NWConnection) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 2048) { [weak self] data, _, _, error in
+            guard let self, let data, error == nil else { conn.cancel(); return }
+
+            let req       = String(data: data, encoding: .utf8) ?? ""
+            let firstLine = req.components(separatedBy: "\r\n").first ?? ""
+            let parts     = firstLine.components(separatedBy: " ")
+            let path      = parts.count > 1 ? parts[1] : ""
+
+            let (status, body): (String, String)
+            switch path {
+            case "/next": DispatchQueue.main.async { self.onNext() }; (status, body) = ("200 OK", "next\n")
+            case "/prev": DispatchQueue.main.async { self.onPrev() }; (status, body) = ("200 OK", "prev\n")
+            case "/blur": DispatchQueue.main.async { self.onBlur() }; (status, body) = ("200 OK", "blur\n")
+            default:                                                   (status, body) = ("404 Not Found", "endpoints: /next /prev /blur\n")
+            }
+
+            let msg = "HTTP/1.1 \(status)\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+            conn.send(content: Data(msg.utf8), completion: .contentProcessed { _ in conn.cancel() })
+        }
+    }
+}
+
 // MARK: - Controller
 
 class WallpaperController: NSObject {
@@ -43,6 +104,7 @@ class WallpaperController: NSObject {
     var blurMenuItem: NSMenuItem!
     var shuffleMenuItem: NSMenuItem!
     var globalMonitor: Any?
+    var httpServer: HTTPServer?
 
     var activeImages: [URL] { shuffleEnabled ? shuffledImages : images }
 
@@ -56,6 +118,7 @@ class WallpaperController: NSObject {
         setupWindows()
         setupMenu()
         setupMouseMonitor()
+        setupHTTPServer()
     }
 
     deinit {
@@ -192,6 +255,18 @@ class WallpaperController: NSObject {
         shuffleMenuItem.state = shuffleEnabled ? .on : .off
         baseIndex = 0
         updateImages()
+    }
+
+    // MARK: HTTP server
+
+    private func setupHTTPServer() {
+        guard let portStr = ProcessInfo.processInfo.environment["PORT"],
+              let port = UInt16(portStr) else { return }
+        httpServer = HTTPServer(port: port,
+                                onNext: { [weak self] in self?.nextImage() },
+                                onPrev: { [weak self] in self?.prevImage() },
+                                onBlur: { [weak self] in self?.toggleBlur() })
+        httpServer?.start()
     }
 
     // MARK: Double-click monitor
