@@ -276,6 +276,7 @@ class WallpaperController: NSObject {
     private func setupMouseMonitor() {
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
             guard let self, event.clickCount == 2 else { return }
+            guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder" else { return }
             let loc = NSEvent.mouseLocation
             guard self.windows.contains(where: { $0.frame.contains(loc) }) else { return }
             DispatchQueue.main.async { self.toggleBlur() }
