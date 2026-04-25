@@ -35,17 +35,23 @@ class WallpaperController: NSObject {
     let images: [URL]
     var baseIndex = 0
     var blurEnabled = false
+    var shuffleEnabled = true
+    var shuffledImages: [URL] = []
     var blurCache: [URL: NSImage] = [:]
     var windows: [NSWindow] = []
     var statusItem: NSStatusItem!
     var blurMenuItem: NSMenuItem!
+    var shuffleMenuItem: NSMenuItem!
     var globalMonitor: Any?
+
+    var activeImages: [URL] { shuffleEnabled ? shuffledImages : images }
 
     // One shared GPU-backed context for all blur operations
     lazy var ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     init(images: [URL]) {
         self.images = images
+        self.shuffledImages = images.shuffled()
         super.init()
         setupWindows()
         setupMenu()
@@ -89,16 +95,16 @@ class WallpaperController: NSObject {
 
     private func updateImages() {
         for (i, win) in windows.enumerated() {
-            let url = images[(baseIndex + i) % images.count]
+            let url = activeImages[(baseIndex + i) % activeImages.count]
 
             if !blurEnabled {
                 win.contentView?.layer?.contents = NSImage(contentsOf: url)
-                return
+                continue
             }
 
             if let cached = blurCache[url] {
                 win.contentView?.layer?.contents = cached
-                return
+                continue
             }
 
             DispatchQueue.global(qos: .userInitiated).async { [weak self, weak win] in
@@ -151,6 +157,11 @@ class WallpaperController: NSObject {
         blurMenuItem.target = self
         menu.addItem(blurMenuItem)
 
+        shuffleMenuItem = NSMenuItem(title: "Shuffle", action: #selector(toggleShuffle), keyEquivalent: "s")
+        shuffleMenuItem.target = self
+        shuffleMenuItem.state = .on
+        menu.addItem(shuffleMenuItem)
+
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
@@ -160,18 +171,26 @@ class WallpaperController: NSObject {
     // MARK: Actions
 
     @objc func nextImage() {
-        baseIndex = (baseIndex + 1) % images.count
+        baseIndex = (baseIndex + 1) % activeImages.count
         updateImages()
     }
 
     @objc func prevImage() {
-        baseIndex = (baseIndex - 1 + images.count) % images.count
+        baseIndex = (baseIndex - 1 + activeImages.count) % activeImages.count
         updateImages()
     }
 
     @objc func toggleBlur() {
         blurEnabled.toggle()
         blurMenuItem.state = blurEnabled ? .on : .off
+        updateImages()
+    }
+
+    @objc func toggleShuffle() {
+        shuffleEnabled.toggle()
+        if shuffleEnabled { shuffledImages = images.shuffled() }
+        shuffleMenuItem.state = shuffleEnabled ? .on : .off
+        baseIndex = 0
         updateImages()
     }
 
