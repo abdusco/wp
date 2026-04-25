@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import CoreImage
 
 // MARK: - Image collection
 
@@ -33,18 +34,32 @@ func collectImages(from paths: [String]) -> [URL] {
 class WallpaperController: NSObject {
     let images: [URL]
     var baseIndex = 0
+    var blurEnabled = false
+    var blurCache: [URL: NSImage] = [:]
     var windows: [NSWindow] = []
     var statusItem: NSStatusItem!
+    var blurMenuItem: NSMenuItem!
+    var globalMonitor: Any?
+
+    // One shared GPU-backed context for all blur operations
+    lazy var ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     init(images: [URL]) {
         self.images = images
         super.init()
         setupWindows()
         setupMenu()
+        setupMouseMonitor()
     }
 
+    deinit {
+        if let m = globalMonitor { NSEvent.removeMonitor(m) }
+    }
+
+    // MARK: Windows
+
     private func setupWindows() {
-        for (i, screen) in NSScreen.screens.enumerated() {
+        for screen in NSScreen.screens {
             let win = NSWindow(
                 contentRect: screen.frame,
                 styleMask: .borderless,
@@ -66,11 +81,52 @@ class WallpaperController: NSObject {
             win.setFrame(screen.frame, display: false)
             win.orderFrontRegardless()
             windows.append(win)
-
-            _ = i // suppress unused warning; index used via enumerated
         }
         updateImages()
     }
+
+    // MARK: Rendering
+
+    private func updateImages() {
+        for (i, win) in windows.enumerated() {
+            let url = images[(baseIndex + i) % images.count]
+
+            if !blurEnabled {
+                win.contentView?.layer?.contents = NSImage(contentsOf: url)
+                return
+            }
+
+            if let cached = blurCache[url] {
+                win.contentView?.layer?.contents = cached
+                return
+            }
+
+            DispatchQueue.global(qos: .userInitiated).async { [weak self, weak win] in
+                guard let self,
+                      let img = NSImage(contentsOf: url),
+                      let blurred = self.blurImage(img, sigma: 200) else { return }
+                DispatchQueue.main.async {
+                    self.blurCache[url] = blurred
+                    win?.contentView?.layer?.contents = blurred
+                }
+            }
+        }
+    }
+
+    private func blurImage(_ image: NSImage, sigma: Double) -> NSImage? {
+        var rect = NSRect(origin: .zero, size: image.size)
+        guard let cg = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { return nil }
+        let ci = CIImage(cgImage: cg)
+        // clampedToExtent repeats edge pixels into infinity so the blur has
+        // no dark halo at image borders; crop back to original bounds after.
+        let blurred = ci.clampedToExtent()
+            .applyingGaussianBlur(sigma: sigma)
+            .cropped(to: ci.extent)
+        guard let out = ciContext.createCGImage(blurred, from: ci.extent) else { return nil }
+        return NSImage(cgImage: out, size: image.size)
+    }
+
+    // MARK: Menu
 
     private func setupMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -90,28 +146,46 @@ class WallpaperController: NSObject {
         menu.addItem(next)
 
         menu.addItem(.separator())
+
+        blurMenuItem = NSMenuItem(title: "Blur", action: #selector(toggleBlur), keyEquivalent: "b")
+        blurMenuItem.target = self
+        menu.addItem(blurMenuItem)
+
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         statusItem.menu = menu
     }
 
-    private func updateImages() {
-        for (i, win) in windows.enumerated() {
-            let url = images[(baseIndex + i) % images.count]
-            if let img = NSImage(contentsOf: url) {
-                win.contentView?.layer?.contents = img
-            }
-        }
-    }
+    // MARK: Actions
 
-    @objc private func nextImage() {
+    @objc func nextImage() {
         baseIndex = (baseIndex + 1) % images.count
         updateImages()
     }
 
-    @objc private func prevImage() {
+    @objc func prevImage() {
         baseIndex = (baseIndex - 1 + images.count) % images.count
         updateImages()
+    }
+
+    @objc func toggleBlur() {
+        blurEnabled.toggle()
+        blurMenuItem.state = blurEnabled ? .on : .off
+        updateImages()
+    }
+
+    // MARK: Double-click monitor
+    // Windows at kCGDesktopWindowLevel sit below Finder's desktop layer, so they
+    // can't receive mouse events normally. A global monitor sees all clicks without
+    // requiring Accessibility permissions for mouse events.
+    private func setupMouseMonitor() {
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            guard let self, event.clickCount == 2 else { return }
+            let loc = NSEvent.mouseLocation
+            guard self.windows.contains(where: { $0.frame.contains(loc) }) else { return }
+            DispatchQueue.main.async { self.toggleBlur() }
+        }
     }
 }
 
