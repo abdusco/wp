@@ -314,7 +314,15 @@ class WallpaperController: NSObject {
 
 // MARK: - Entry point
 
+var version = "dev"
+
 let args = Array(CommandLine.arguments.dropFirst())
+
+if args == ["--version"] || args == ["-v"] {
+    print("wp \(version)")
+    exit(0)
+}
+
 guard !args.isEmpty else {
     fputs("Usage: wp <image|dir> [...]\n", stderr)
     exit(1)
