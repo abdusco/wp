@@ -91,6 +91,16 @@ final class HTTPServer {
     }
 }
 
+// MARK: - DesktopWindow
+
+private class DesktopWindow: NSWindow {
+    // NSWindow.constrainFrameRect clips to visibleFrame, which excludes the menu bar.
+    // Return the rect unchanged so our window covers the full screen.frame.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        return frameRect
+    }
+}
+
 // MARK: - Controller
 
 class WallpaperController: NSObject {
@@ -134,7 +144,7 @@ class WallpaperController: NSObject {
 
     private func setupWindows() {
         for screen in NSScreen.screens {
-            let win = NSWindow(
+            let win = DesktopWindow(
                 contentRect: screen.frame,
                 styleMask: .borderless,
                 backing: .buffered,
@@ -161,17 +171,28 @@ class WallpaperController: NSObject {
 
     // MARK: Rendering
 
+    private func fadeTransition() -> CATransition {
+        let t = CATransition()
+        t.duration = 0.6
+        t.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        return t
+    }
+
     private func updateImages() {
         for (i, win) in windows.enumerated() {
             let url = activeImages[(baseIndex + i) % activeImages.count]
 
             if !blurEnabled {
-                win.contentView?.layer?.contents = NSImage(contentsOf: url)
+                let layer = win.contentView?.layer
+                layer?.add(fadeTransition(), forKey: "transition")
+                layer?.contents = NSImage(contentsOf: url)
                 continue
             }
 
             if let cached = blurCache[url] {
-                win.contentView?.layer?.contents = cached
+                let layer = win.contentView?.layer
+                layer?.add(fadeTransition(), forKey: "transition")
+                layer?.contents = cached
                 continue
             }
 
@@ -181,7 +202,9 @@ class WallpaperController: NSObject {
                       let blurred = self.blurImage(img, sigma: 200) else { return }
                 DispatchQueue.main.async {
                     self.blurCache[url] = blurred
-                    win?.contentView?.layer?.contents = blurred
+                    let layer = win?.contentView?.layer
+                    layer?.add(self.fadeTransition(), forKey: "transition")
+                    layer?.contents = blurred
                 }
             }
         }
