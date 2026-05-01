@@ -210,6 +210,12 @@ class WallpaperController: NSObject {
         setupMenu()
         setupMouseMonitor()
         setupHTTPServer()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(screensChanged),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
     }
 
     deinit {
@@ -218,6 +224,13 @@ class WallpaperController: NSObject {
     }
 
     // MARK: Windows
+
+    @objc private func screensChanged() {
+        for win in windows { win.orderOut(nil) }
+        windows = []
+        blurCache = [:]
+        setupWindows()
+    }
 
     private func setupWindows() {
         for screen in NSScreen.screens {
