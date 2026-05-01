@@ -91,6 +91,77 @@ final class HTTPServer {
     }
 }
 
+// MARK: - Auto cycle intervals
+
+let autoCycleIntervals: [(label: String, seconds: TimeInterval)] = [
+    ("5s", 5), ("10s", 10), ("30s", 30),
+    ("1m", 60), ("5m", 300), ("15m", 900),
+    ("30m", 1800), ("1h", 3600), ("2h", 7200),
+    ("6h", 21600), ("12h", 43200), ("24h", 86400)
+]
+
+// MARK: - IntervalSliderView
+
+final class IntervalSliderView: NSView {
+    var onChange: (Int) -> Void = { _ in }
+
+    private let slider: NSSlider
+    private let label: NSTextField
+
+    init(initialIndex: Int, onChange: @escaping (Int) -> Void) {
+        self.onChange = onChange
+
+        slider = NSSlider()
+        slider.minValue = 0
+        slider.maxValue = Double(autoCycleIntervals.count - 1)
+        slider.numberOfTickMarks = autoCycleIntervals.count
+        slider.allowsTickMarkValuesOnly = true
+        slider.integerValue = initialIndex
+        slider.controlSize = .small
+        slider.translatesAutoresizingMaskIntoConstraints = false
+
+        label = NSTextField(labelWithString: autoCycleIntervals[initialIndex].label)
+        label.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        label.alignment = .right
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(slider)
+        addSubview(label)
+
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(greaterThanOrEqualToConstant: 200),
+            heightAnchor.constraint(equalToConstant: 34),
+
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.widthAnchor.constraint(equalToConstant: 32),
+
+            slider.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            slider.trailingAnchor.constraint(equalTo: label.leadingAnchor, constant: -6),
+            slider.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+
+        slider.target = self
+        slider.action = #selector(sliderChanged(_:))
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func sliderChanged(_ sender: NSSlider) {
+        let idx = sender.integerValue
+        label.stringValue = autoCycleIntervals[idx].label
+        onChange(idx)
+    }
+
+    func setEnabled(_ enabled: Bool) {
+        slider.isEnabled = enabled
+        label.alphaValue = enabled ? 1 : 0.4
+    }
+}
+
 // MARK: - DesktopWindow
 
 private class DesktopWindow: NSWindow {
@@ -116,6 +187,11 @@ class WallpaperController: NSObject {
     var shuffleMenuItem: NSMenuItem!
     var globalMonitor: Any?
     var httpServer: HTTPServer?
+    var autoCycleEnabled = false
+    var autoCycleIntervalIndex = 4
+    var autoCycleTimer: Timer?
+    var autoCycleMenuItem: NSMenuItem!
+    var autoCycleSliderView: IntervalSliderView!
 
     var activeImages: [URL] { shuffleEnabled ? shuffledImages : images }
 
@@ -138,6 +214,7 @@ class WallpaperController: NSObject {
 
     deinit {
         if let m = globalMonitor { NSEvent.removeMonitor(m) }
+        autoCycleTimer?.invalidate()
     }
 
     // MARK: Windows
@@ -150,8 +227,8 @@ class WallpaperController: NSObject {
                 backing: .buffered,
                 defer: false
             )
-            win.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)))
-            win.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+            win.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) - 1)
+            win.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle]
             win.backgroundColor = .black
             win.isOpaque = true
             win.isReleasedWhenClosed = false
@@ -254,6 +331,20 @@ class WallpaperController: NSObject {
         menu.addItem(shuffleMenuItem)
 
         menu.addItem(.separator())
+
+        autoCycleMenuItem = NSMenuItem(title: "Auto Cycle", action: #selector(toggleAutoCycle), keyEquivalent: "a")
+        autoCycleMenuItem.target = self
+        menu.addItem(autoCycleMenuItem)
+
+        autoCycleSliderView = IntervalSliderView(initialIndex: autoCycleIntervalIndex) { [weak self] idx in
+            self?.setAutoCycleInterval(idx)
+        }
+        autoCycleSliderView.setEnabled(false)
+        let sliderItem = NSMenuItem()
+        sliderItem.view = autoCycleSliderView
+        menu.addItem(sliderItem)
+
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         statusItem.menu = menu
@@ -283,6 +374,33 @@ class WallpaperController: NSObject {
         shuffleMenuItem.state = shuffleEnabled ? .on : .off
         baseIndex = 0
         updateImages()
+    }
+
+    @objc func toggleAutoCycle() {
+        autoCycleEnabled.toggle()
+        autoCycleMenuItem.state = autoCycleEnabled ? .on : .off
+        autoCycleSliderView.setEnabled(autoCycleEnabled)
+        autoCycleEnabled ? startAutoCycle() : stopAutoCycle()
+    }
+
+    func setAutoCycleInterval(_ index: Int) {
+        autoCycleIntervalIndex = index
+        if autoCycleEnabled { startAutoCycle() }
+    }
+
+    private func startAutoCycle() {
+        autoCycleTimer?.invalidate()
+        let secs = autoCycleIntervals[autoCycleIntervalIndex].seconds
+        let timer = Timer(timeInterval: secs, repeats: true) { [weak self] _ in
+            self?.nextImage()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        autoCycleTimer = timer
+    }
+
+    private func stopAutoCycle() {
+        autoCycleTimer?.invalidate()
+        autoCycleTimer = nil
     }
 
     // MARK: HTTP server
