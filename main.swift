@@ -35,12 +35,12 @@ func collectImages(from paths: [String]) -> [URL] {
 
 final class HTTPServer {
     private let port: UInt16
-    private let onNext: () -> Void
-    private let onPrev: () -> Void
+    private let onNext: (CycleTarget) -> Void
+    private let onPrev: (CycleTarget) -> Void
     private let onBlur: () -> Void
     private var listener: NWListener?
 
-    init(port: UInt16, onNext: @escaping () -> Void, onPrev: @escaping () -> Void, onBlur: @escaping () -> Void) {
+    init(port: UInt16, onNext: @escaping (CycleTarget) -> Void, onPrev: @escaping (CycleTarget) -> Void, onBlur: @escaping () -> Void) {
         self.port = port
         self.onNext = onNext
         self.onPrev = onPrev
@@ -75,14 +75,19 @@ final class HTTPServer {
             let req       = String(data: data, encoding: .utf8) ?? ""
             let firstLine = req.components(separatedBy: "\r\n").first ?? ""
             let parts     = firstLine.components(separatedBy: " ")
-            let path      = parts.count > 1 ? parts[1] : ""
+            let rawPath   = parts.count > 1 ? parts[1] : ""
+
+            let pathParts = rawPath.components(separatedBy: "?")
+            let path      = pathParts[0]
+            let target: CycleTarget = (pathParts.count > 1 && pathParts[1].contains("current_display=true"))
+                ? .currentDisplay : .all
 
             let (status, body): (String, String)
             switch path {
-            case "/next": DispatchQueue.main.async { self.onNext() }; (status, body) = ("200 OK", "next\n")
-            case "/prev": DispatchQueue.main.async { self.onPrev() }; (status, body) = ("200 OK", "prev\n")
-            case "/blur": DispatchQueue.main.async { self.onBlur() }; (status, body) = ("200 OK", "blur\n")
-            default:                                                   (status, body) = ("404 Not Found", "endpoints: /next /prev /blur\n")
+            case "/next": DispatchQueue.main.async { self.onNext(target) }; (status, body) = ("200 OK", "next\n")
+            case "/prev": DispatchQueue.main.async { self.onPrev(target) }; (status, body) = ("200 OK", "prev\n")
+            case "/blur": DispatchQueue.main.async { self.onBlur() };       (status, body) = ("200 OK", "blur\n")
+            default:                                                         (status, body) = ("404 Not Found", "endpoints: /next /prev /blur\n")
             }
 
             let msg = "HTTP/1.1 \(status)\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
@@ -90,6 +95,10 @@ final class HTTPServer {
         }
     }
 }
+
+// MARK: - Cycle target
+
+enum CycleTarget { case all, currentDisplay }
 
 // MARK: - Auto cycle intervals
 
@@ -176,10 +185,10 @@ private class DesktopWindow: NSWindow {
 
 class WallpaperController: NSObject {
     let images: [URL]
-    var baseIndex = 0
+    var imageIndices: [Int] = []
     var blurEnabled = false
     var shuffleEnabled = true
-    var shuffledImages: [URL] = []
+    var shuffledImages: [[URL]] = []
     var blurCache: [URL: NSImage] = [:]
     var windows: [NSWindow] = []
     var statusItem: NSStatusItem!
@@ -193,7 +202,9 @@ class WallpaperController: NSObject {
     var autoCycleMenuItem: NSMenuItem!
     var autoCycleSliderView: IntervalSliderView!
 
-    var activeImages: [URL] { shuffleEnabled ? shuffledImages : images }
+    func activeImages(for windowIndex: Int) -> [URL] {
+        shuffleEnabled && windowIndex < shuffledImages.count ? shuffledImages[windowIndex] : images
+    }
 
     lazy var ciContext: CIContext = {
         if let device = MTLCreateSystemDefaultDevice() {
@@ -204,7 +215,6 @@ class WallpaperController: NSObject {
 
     init(images: [URL]) {
         self.images = images
-        self.shuffledImages = images.shuffled()
         super.init()
         setupWindows()
         setupMenu()
@@ -256,6 +266,8 @@ class WallpaperController: NSObject {
             win.orderFrontRegardless()
             windows.append(win)
         }
+        imageIndices   = Array(repeating: 0, count: windows.count)
+        shuffledImages = (0..<windows.count).map { _ in images.shuffled() }
         updateImages()
     }
 
@@ -268,9 +280,13 @@ class WallpaperController: NSObject {
         return t
     }
 
-    private func updateImages() {
-        for (i, win) in windows.enumerated() {
-            let url = activeImages[(baseIndex + i) % activeImages.count]
+    private func updateImages(windowIndex: Int? = nil) {
+        let targets = windowIndex.map { [$0] } ?? Array(windows.indices)
+        for i in targets {
+            guard i < windows.count, i < imageIndices.count else { continue }
+            let win = windows[i]
+            let pool = activeImages(for: i)
+            let url  = pool[imageIndices[i] % pool.count]
 
             if !blurEnabled {
                 let layer = win.contentView?.layer
@@ -365,14 +381,21 @@ class WallpaperController: NSObject {
 
     // MARK: Actions
 
-    @objc func nextImage() {
-        baseIndex = (baseIndex + 1) % activeImages.count
-        updateImages()
+    @objc func nextImage() { cycleImage(delta:  1, windowIndex: nil) }
+    @objc func prevImage() { cycleImage(delta: -1, windowIndex: nil) }
+
+    func cycleImage(delta: Int, windowIndex: Int?) {
+        let targets = windowIndex.map { [$0] } ?? Array(imageIndices.indices)
+        for i in targets where i < imageIndices.count {
+            let count = activeImages(for: i).count
+            imageIndices[i] = (imageIndices[i] + delta + count) % count
+        }
+        updateImages(windowIndex: windowIndex)
     }
 
-    @objc func prevImage() {
-        baseIndex = (baseIndex - 1 + activeImages.count) % activeImages.count
-        updateImages()
+    private func currentDisplayWindowIndex() -> Int? {
+        let loc = NSEvent.mouseLocation
+        return windows.firstIndex(where: { $0.frame.contains(loc) })
     }
 
     @objc func toggleBlur() {
@@ -383,9 +406,9 @@ class WallpaperController: NSObject {
 
     @objc func toggleShuffle() {
         shuffleEnabled.toggle()
-        if shuffleEnabled { shuffledImages = images.shuffled() }
+        if shuffleEnabled { shuffledImages = (0..<windows.count).map { _ in images.shuffled() } }
         shuffleMenuItem.state = shuffleEnabled ? .on : .off
-        baseIndex = 0
+        imageIndices = Array(repeating: 0, count: windows.count)
         updateImages()
     }
 
@@ -422,8 +445,16 @@ class WallpaperController: NSObject {
         guard let portStr = ProcessInfo.processInfo.environment["PORT"],
               let port = UInt16(portStr) else { return }
         httpServer = HTTPServer(port: port,
-                                onNext: { [weak self] in self?.nextImage() },
-                                onPrev: { [weak self] in self?.prevImage() },
+                                onNext: { [weak self] target in
+                                    guard let self else { return }
+                                    let idx = target == .currentDisplay ? self.currentDisplayWindowIndex() : nil
+                                    self.cycleImage(delta:  1, windowIndex: idx)
+                                },
+                                onPrev: { [weak self] target in
+                                    guard let self else { return }
+                                    let idx = target == .currentDisplay ? self.currentDisplayWindowIndex() : nil
+                                    self.cycleImage(delta: -1, windowIndex: idx)
+                                },
                                 onBlur: { [weak self] in self?.toggleBlur() })
         httpServer?.start()
     }
