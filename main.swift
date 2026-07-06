@@ -198,7 +198,6 @@ class WallpaperController: NSObject {
     var httpServer: HTTPServer?
     var autoBlurOnLockEnabled = true
     var autoBlurOnLockMenuItem: NSMenuItem!
-    private var blurStateBeforeAutoBlur: Bool?
     var autoCycleEnabled = false
     var autoCycleIntervalIndex = 4
     var autoCycleTimer: Timer?
@@ -456,35 +455,28 @@ class WallpaperController: NSObject {
     }
 
     // MARK: Lock screen monitor
-    // com.apple.screenIs{Locked,Unlocked} cover the login-window lock; the
-    // screensDidSleep/Wake pair also catches lid-close/display-sleep, which
-    // doesn't always post a lock notification (e.g. no password required).
-    // The guard on blurStateBeforeAutoBlur prevents the second notification
-    // in a lock+sleep pair from clobbering the saved pre-lock state.
+    // com.apple.screenIsLocked covers the login-window lock; screensDidSleep
+    // also catches lid-close/display-sleep, which doesn't always post a lock
+    // notification (e.g. no password required). Blur only ever turns on here
+    // and stays on until the user toggles it off manually.
     private func setupLockScreenMonitor() {
-        let dnc = DistributedNotificationCenter.default()
-        dnc.addObserver(self, selector: #selector(handleScreenLocked),
-                        name: Notification.Name("com.apple.screenIsLocked"), object: nil)
-        dnc.addObserver(self, selector: #selector(handleScreenUnlocked),
-                        name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
+        // The 4-arg addObserver on DistributedNotificationCenter defaults to a
+        // suspension behavior that can coalesce/drop notifications for a
+        // background (non-frontmost) app like this one; deliverImmediately
+        // is required so a menu-bar accessory app reliably gets these.
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(engageAutoBlur),
+            name: Notification.Name("com.apple.screenIsLocked"), object: nil,
+            suspensionBehavior: .deliverImmediately)
 
-        let wsnc = NSWorkspace.shared.notificationCenter
-        wsnc.addObserver(self, selector: #selector(handleScreenLocked),
-                         name: NSWorkspace.screensDidSleepNotification, object: nil)
-        wsnc.addObserver(self, selector: #selector(handleScreenUnlocked),
-                         name: NSWorkspace.screensDidWakeNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(engageAutoBlur),
+            name: NSWorkspace.screensDidSleepNotification, object: nil)
     }
 
-    @objc private func handleScreenLocked() {
-        guard autoBlurOnLockEnabled, blurStateBeforeAutoBlur == nil else { return }
-        blurStateBeforeAutoBlur = blurEnabled
-        if !blurEnabled { toggleBlur() }
-    }
-
-    @objc private func handleScreenUnlocked() {
-        guard let previous = blurStateBeforeAutoBlur else { return }
-        blurStateBeforeAutoBlur = nil
-        if blurEnabled != previous { toggleBlur() }
+    @objc private func engageAutoBlur() {
+        guard autoBlurOnLockEnabled, !blurEnabled else { return }
+        toggleBlur()
     }
 
     // MARK: HTTP server
