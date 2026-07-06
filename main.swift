@@ -196,6 +196,9 @@ class WallpaperController: NSObject {
     var shuffleMenuItem: NSMenuItem!
     var globalMonitor: Any?
     var httpServer: HTTPServer?
+    var autoBlurOnLockEnabled = true
+    var autoBlurOnLockMenuItem: NSMenuItem!
+    private var blurStateBeforeAutoBlur: Bool?
     var autoCycleEnabled = false
     var autoCycleIntervalIndex = 4
     var autoCycleTimer: Timer?
@@ -220,6 +223,7 @@ class WallpaperController: NSObject {
         setupMenu()
         setupMouseMonitor()
         setupHTTPServer()
+        setupLockScreenMonitor()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(screensChanged),
@@ -231,6 +235,8 @@ class WallpaperController: NSObject {
     deinit {
         if let m = globalMonitor { NSEvent.removeMonitor(m) }
         autoCycleTimer?.invalidate()
+        DistributedNotificationCenter.default().removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     // MARK: Windows
@@ -361,6 +367,11 @@ class WallpaperController: NSObject {
 
         menu.addItem(.separator())
 
+        autoBlurOnLockMenuItem = NSMenuItem(title: "Auto Blur on Lock", action: #selector(toggleAutoBlurOnLock), keyEquivalent: "")
+        autoBlurOnLockMenuItem.target = self
+        autoBlurOnLockMenuItem.state = autoBlurOnLockEnabled ? .on : .off
+        menu.addItem(autoBlurOnLockMenuItem)
+
         autoCycleMenuItem = NSMenuItem(title: "Auto Cycle", action: #selector(toggleAutoCycle), keyEquivalent: "a")
         autoCycleMenuItem.target = self
         menu.addItem(autoCycleMenuItem)
@@ -437,6 +448,43 @@ class WallpaperController: NSObject {
     private func stopAutoCycle() {
         autoCycleTimer?.invalidate()
         autoCycleTimer = nil
+    }
+
+    @objc func toggleAutoBlurOnLock() {
+        autoBlurOnLockEnabled.toggle()
+        autoBlurOnLockMenuItem.state = autoBlurOnLockEnabled ? .on : .off
+    }
+
+    // MARK: Lock screen monitor
+    // com.apple.screenIs{Locked,Unlocked} cover the login-window lock; the
+    // screensDidSleep/Wake pair also catches lid-close/display-sleep, which
+    // doesn't always post a lock notification (e.g. no password required).
+    // The guard on blurStateBeforeAutoBlur prevents the second notification
+    // in a lock+sleep pair from clobbering the saved pre-lock state.
+    private func setupLockScreenMonitor() {
+        let dnc = DistributedNotificationCenter.default()
+        dnc.addObserver(self, selector: #selector(handleScreenLocked),
+                        name: Notification.Name("com.apple.screenIsLocked"), object: nil)
+        dnc.addObserver(self, selector: #selector(handleScreenUnlocked),
+                        name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
+
+        let wsnc = NSWorkspace.shared.notificationCenter
+        wsnc.addObserver(self, selector: #selector(handleScreenLocked),
+                         name: NSWorkspace.screensDidSleepNotification, object: nil)
+        wsnc.addObserver(self, selector: #selector(handleScreenUnlocked),
+                         name: NSWorkspace.screensDidWakeNotification, object: nil)
+    }
+
+    @objc private func handleScreenLocked() {
+        guard autoBlurOnLockEnabled, blurStateBeforeAutoBlur == nil else { return }
+        blurStateBeforeAutoBlur = blurEnabled
+        if !blurEnabled { toggleBlur() }
+    }
+
+    @objc private func handleScreenUnlocked() {
+        guard let previous = blurStateBeforeAutoBlur else { return }
+        blurStateBeforeAutoBlur = nil
+        if blurEnabled != previous { toggleBlur() }
     }
 
     // MARK: HTTP server
