@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-13
+    runs-on: macos-15
     strategy:
       matrix:
         arch: [x86_64, arm64]
@@ -19,9 +19,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      - name: Select Xcode version
-        run: sudo xcode-select --switch /Applications/Xcode_14.3.1.app
 
       - name: Build Swift application
         run: |
