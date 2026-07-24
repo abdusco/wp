@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import CoreGraphics
 import CoreImage
 import Metal
 import Network
@@ -509,8 +510,32 @@ class WallpaperController: NSObject {
             guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder" else { return }
             let loc = NSEvent.mouseLocation
             guard self.windows.contains(where: { $0.frame.contains(loc) }) else { return }
+            guard self.isDesktopClick(at: loc) else { return }
             DispatchQueue.main.async { self.toggleBlur() }
         }
+    }
+
+    // Frontmost-app-is-Finder alone doesn't distinguish the desktop from an
+    // actual (possibly maximized) Finder window, since both run as the same
+    // process. Cross-check against the on-screen window list (no Accessibility
+    // permission required) and bail if any normal window actually covers the
+    // click point.
+    private func isDesktopClick(at loc: NSPoint) -> Bool {
+        guard let primaryHeight = NSScreen.screens.first?.frame.height else { return true }
+        let cgPoint = CGPoint(x: loc.x, y: primaryHeight - loc.y)
+
+        guard let infoList = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else {
+            return true
+        }
+
+        for info in infoList {
+            guard let layer = info[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
+            guard let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] else { continue }
+            let rect = CGRect(x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0,
+                               width: bounds["Width"] ?? 0, height: bounds["Height"] ?? 0)
+            if rect.contains(cgPoint) { return false }
+        }
+        return true
     }
 }
 
