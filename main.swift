@@ -545,13 +545,31 @@ var version = "dev"
 
 let args = Array(CommandLine.arguments.dropFirst())
 
+let usage = """
+Usage: wp <image|dir> [...]
+
+  --version, -v   Print version and exit
+  --help, -h      Show this help and exit
+
+Environment:
+  PORT            If set, starts an HTTP server on this port for remote control:
+                     /next   Show the next image (add ?current_display=true to target only the display under the cursor)
+                     /prev   Show the previous image (same query param supported)
+                     /blur   Toggle blur
+"""
+
 if args == ["--version"] || args == ["-v"] {
     print("wp \(version)")
     exit(0)
 }
 
+if args == ["--help"] || args == ["-h"] {
+    print(usage)
+    exit(0)
+}
+
 guard !args.isEmpty else {
-    fputs("Usage: wp <image|dir> [...]\n", stderr)
+    fputs(usage + "\n", stderr)
     exit(1)
 }
 
