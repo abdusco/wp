@@ -184,14 +184,29 @@ private class DesktopWindow: NSWindow {
 
 // MARK: - Controller
 
+// Per-display state, keyed by the display's stable identity. The window is
+// transient (recreated when a display reconnects), but imageIndex and the
+// shuffled order persist so a display resumes exactly where it left off after
+// a disconnect/reconnect (e.g. closing and reopening the lid).
+final class Display {
+    let key: String
+    var window: NSWindow?
+    var imageIndex = 0
+    var shuffled: [URL]
+
+    init(key: String, shuffled: [URL]) {
+        self.key = key
+        self.shuffled = shuffled
+    }
+}
+
 class WallpaperController: NSObject {
     let images: [URL]
-    var imageIndices: [Int] = []
+    var displays: [String: Display] = [:]   // persists across disconnects
+    var order: [String] = []                 // keys of connected displays, in screen order
     var blurEnabled = false
     var shuffleEnabled = true
-    var shuffledImages: [[URL]] = []
     var blurCache: [URL: NSImage] = [:]
-    var windows: [NSWindow] = []
     var statusItem: NSStatusItem!
     var blurMenuItem: NSMenuItem!
     var shuffleMenuItem: NSMenuItem!
@@ -205,8 +220,10 @@ class WallpaperController: NSObject {
     var autoCycleMenuItem: NSMenuItem!
     var autoCycleSliderView: IntervalSliderView!
 
-    func activeImages(for windowIndex: Int) -> [URL] {
-        shuffleEnabled && windowIndex < shuffledImages.count ? shuffledImages[windowIndex] : images
+    var connected: [Display] { order.compactMap { displays[$0] } }
+
+    func activeImages(for display: Display) -> [URL] {
+        shuffleEnabled ? display.shuffled : images
     }
 
     lazy var ciContext: CIContext = {
@@ -219,7 +236,7 @@ class WallpaperController: NSObject {
     init(images: [URL]) {
         self.images = images
         super.init()
-        setupWindows()
+        syncScreens()
         setupMenu()
         setupMouseMonitor()
         setupHTTPServer()
@@ -242,38 +259,84 @@ class WallpaperController: NSObject {
     // MARK: Windows
 
     @objc private func screensChanged() {
-        for win in windows { win.orderOut(nil) }
-        windows = []
-        blurCache = [:]
-        setupWindows()
+        syncScreens()
     }
 
-    private func setupWindows() {
-        for screen in NSScreen.screens {
-            let win = DesktopWindow(
-                contentRect: screen.frame,
-                styleMask: .borderless,
-                backing: .buffered,
-                defer: false
-            )
-            win.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) - 1)
-            win.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle]
-            win.backgroundColor = .black
-            win.isOpaque = true
-            win.isReleasedWhenClosed = false
+    // A display's identity must survive disconnect/reconnect (unplugging a
+    // monitor, or closing and reopening the lid while an external display is
+    // attached). CGDirectDisplayID is only valid for the current configuration
+    // and can be renumbered, so it's unusable as a persistent key. The EDID
+    // vendor/model/serial triple identifies the physical panel itself; fall
+    // back to the localized name when EDID is unavailable (e.g. some virtual
+    // or software displays).
+    private func stableKey(for screen: NSScreen) -> String {
+        guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+        else { return screen.localizedName }
+        let vendor = CGDisplayVendorNumber(id)
+        let model  = CGDisplayModelNumber(id)
+        let serial = CGDisplaySerialNumber(id)
+        guard vendor != 0 || model != 0 || serial != 0 else { return screen.localizedName }
+        return "\(vendor)-\(model)-\(serial)"
+    }
 
-            let view = NSView(frame: CGRect(origin: .zero, size: screen.frame.size))
-            view.wantsLayer = true
-            view.layer?.contentsGravity = .resizeAspectFill
-            view.layer?.masksToBounds = true
-            view.autoresizingMask = [.width, .height]
-            win.contentView = view
-            win.setFrame(screen.frame, display: false)
-            win.orderFrontRegardless()
-            windows.append(win)
+    private func makeWindow(for screen: NSScreen) -> NSWindow {
+        let win = DesktopWindow(
+            contentRect: screen.frame,
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        win.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) - 1)
+        win.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle]
+        win.backgroundColor = .black
+        win.isOpaque = true
+        win.isReleasedWhenClosed = false
+
+        let view = NSView(frame: CGRect(origin: .zero, size: screen.frame.size))
+        view.wantsLayer = true
+        view.layer?.contentsGravity = .resizeAspectFill
+        view.layer?.masksToBounds = true
+        view.autoresizingMask = [.width, .height]
+        win.contentView = view
+        win.setFrame(screen.frame, display: false)
+        win.orderFrontRegardless()
+        return win
+    }
+
+    // Reconciles windows against the currently-connected displays. State for
+    // each display is looked up by its stable key, so a reconnected display
+    // keeps its window position, image index, and shuffle order; a genuinely
+    // new display gets fresh state. Disconnected displays keep their state in
+    // `displays` (only their window is torn down) so they resume on reconnect.
+    private func syncScreens() {
+        let screens = NSScreen.screens
+        var newOrder: [String] = []
+
+        for screen in screens {
+            let key = stableKey(for: screen)
+            newOrder.append(key)
+
+            let display = displays[key] ?? {
+                let d = Display(key: key, shuffled: images.shuffled())
+                displays[key] = d
+                return d
+            }()
+
+            if let win = display.window {
+                win.setFrame(screen.frame, display: false)
+                win.contentView?.setFrameSize(screen.frame.size)
+            } else {
+                display.window = makeWindow(for: screen)
+            }
         }
-        imageIndices   = Array(repeating: 0, count: windows.count)
-        shuffledImages = (0..<windows.count).map { _ in images.shuffled() }
+
+        let connectedKeys = Set(newOrder)
+        for display in displays.values where !connectedKeys.contains(display.key) {
+            display.window?.orderOut(nil)
+            display.window = nil
+        }
+
+        order = newOrder
         updateImages()
     }
 
@@ -286,13 +349,13 @@ class WallpaperController: NSObject {
         return t
     }
 
-    private func updateImages(windowIndex: Int? = nil) {
-        let targets = windowIndex.map { [$0] } ?? Array(windows.indices)
-        for i in targets {
-            guard i < windows.count, i < imageIndices.count else { continue }
-            let win = windows[i]
-            let pool = activeImages(for: i)
-            let url  = pool[imageIndices[i] % pool.count]
+    private func updateImages(_ target: Display? = nil) {
+        let targets = target.map { [$0] } ?? connected
+        for display in targets {
+            guard let win = display.window else { continue }
+            let pool = activeImages(for: display)
+            guard !pool.isEmpty else { continue }
+            let url = pool[display.imageIndex % pool.count]
 
             if !blurEnabled {
                 let layer = win.contentView?.layer
@@ -392,21 +455,22 @@ class WallpaperController: NSObject {
 
     // MARK: Actions
 
-    @objc func nextImage() { cycleImage(delta:  1, windowIndex: nil) }
-    @objc func prevImage() { cycleImage(delta: -1, windowIndex: nil) }
+    @objc func nextImage() { cycleImage(delta:  1, display: nil) }
+    @objc func prevImage() { cycleImage(delta: -1, display: nil) }
 
-    func cycleImage(delta: Int, windowIndex: Int?) {
-        let targets = windowIndex.map { [$0] } ?? Array(imageIndices.indices)
-        for i in targets where i < imageIndices.count {
-            let count = activeImages(for: i).count
-            imageIndices[i] = (imageIndices[i] + delta + count) % count
+    func cycleImage(delta: Int, display target: Display?) {
+        let targets = target.map { [$0] } ?? connected
+        for display in targets {
+            let count = activeImages(for: display).count
+            guard count > 0 else { continue }
+            display.imageIndex = (display.imageIndex + delta + count) % count
         }
-        updateImages(windowIndex: windowIndex)
+        updateImages(target)
     }
 
-    private func currentDisplayWindowIndex() -> Int? {
+    private func displayUnderCursor() -> Display? {
         let loc = NSEvent.mouseLocation
-        return windows.firstIndex(where: { $0.frame.contains(loc) })
+        return connected.first { $0.window?.frame.contains(loc) ?? false }
     }
 
     @objc func toggleBlur() {
@@ -417,9 +481,11 @@ class WallpaperController: NSObject {
 
     @objc func toggleShuffle() {
         shuffleEnabled.toggle()
-        if shuffleEnabled { shuffledImages = (0..<windows.count).map { _ in images.shuffled() } }
         shuffleMenuItem.state = shuffleEnabled ? .on : .off
-        imageIndices = Array(repeating: 0, count: windows.count)
+        for display in displays.values {
+            if shuffleEnabled { display.shuffled = images.shuffled() }
+            display.imageIndex = 0
+        }
         updateImages()
     }
 
@@ -488,13 +554,13 @@ class WallpaperController: NSObject {
         httpServer = HTTPServer(port: port,
                                 onNext: { [weak self] target in
                                     guard let self else { return }
-                                    let idx = target == .currentDisplay ? self.currentDisplayWindowIndex() : nil
-                                    self.cycleImage(delta:  1, windowIndex: idx)
+                                    let display = target == .currentDisplay ? self.displayUnderCursor() : nil
+                                    self.cycleImage(delta:  1, display: display)
                                 },
                                 onPrev: { [weak self] target in
                                     guard let self else { return }
-                                    let idx = target == .currentDisplay ? self.currentDisplayWindowIndex() : nil
-                                    self.cycleImage(delta: -1, windowIndex: idx)
+                                    let display = target == .currentDisplay ? self.displayUnderCursor() : nil
+                                    self.cycleImage(delta: -1, display: display)
                                 },
                                 onBlur: { [weak self] in self?.toggleBlur() })
         httpServer?.start()
@@ -509,7 +575,7 @@ class WallpaperController: NSObject {
             guard let self, event.clickCount == 2 else { return }
             guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder" else { return }
             let loc = NSEvent.mouseLocation
-            guard self.windows.contains(where: { $0.frame.contains(loc) }) else { return }
+            guard self.connected.contains(where: { $0.window?.frame.contains(loc) ?? false }) else { return }
             guard self.isDesktopClick(at: loc) else { return }
             DispatchQueue.main.async { self.toggleBlur() }
         }
