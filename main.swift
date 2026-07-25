@@ -32,6 +32,22 @@ func collectImages(from paths: [String]) -> [URL] {
     return result
 }
 
+// Truncates a filename to at most `maxLength` characters, eliding the middle
+// of the base name so both the start and the extension stay visible.
+func truncateFilename(_ name: String, maxLength: Int = 80) -> String {
+    guard name.count > maxLength else { return name }
+    let ext = (name as NSString).pathExtension
+    let base = ext.isEmpty ? name : String(name.dropLast(ext.count + 1))
+    let suffix = ext.isEmpty ? "" : ".\(ext)"
+    let budget = maxLength - suffix.count - 1 // 1 for the ellipsis
+    guard budget > 0 else { return String(name.prefix(maxLength)) }
+    let headLen = (budget + 1) / 2
+    let tailLen = budget / 2
+    let head = base.prefix(headLen)
+    let tail = base.suffix(tailLen)
+    return "\(head)…\(tail)\(suffix)"
+}
+
 // MARK: - HTTP Server
 
 final class HTTPServer {
@@ -172,6 +188,89 @@ final class IntervalSliderView: NSView {
     }
 }
 
+// MARK: - WallpaperRowView
+
+// Two-line, clickable menu row: a small display-name label above a larger
+// filename label. Custom NSMenuItem views don't get AppKit's automatic
+// hover-highlight or click-to-select behavior, so both are done by hand
+// here: a tracking area drives the highlight paint/text color, and mouseUp
+// dismisses the menu and fires onClick.
+final class WallpaperRowView: NSView {
+    var onClick: () -> Void = {}
+
+    private let top: NSTextField
+    private let bottom: NSTextField
+    private var trackingArea: NSTrackingArea?
+
+    private var isHighlighted = false {
+        didSet {
+            guard isHighlighted != oldValue else { return }
+            needsDisplay = true
+            top.textColor = isHighlighted ? .white : .secondaryLabelColor
+            bottom.textColor = isHighlighted ? .white : .labelColor
+        }
+    }
+
+    init(displayName: String, filename: String, onClick: @escaping () -> Void) {
+        self.onClick = onClick
+
+        top = NSTextField(labelWithString: displayName)
+        top.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        top.textColor = .secondaryLabelColor
+        top.translatesAutoresizingMaskIntoConstraints = false
+
+        bottom = NSTextField(labelWithString: truncateFilename(filename))
+        bottom.font = .systemFont(ofSize: NSFont.systemFontSize)
+        bottom.translatesAutoresizingMaskIntoConstraints = false
+
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(top)
+        addSubview(bottom)
+
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(greaterThanOrEqualToConstant: 200),
+            heightAnchor.constraint(equalToConstant: 36),
+
+            top.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            top.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -18),
+            top.topAnchor.constraint(equalTo: topAnchor, constant: 3),
+
+            bottom.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            bottom.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -18),
+            bottom.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 1),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let area = NSTrackingArea(rect: bounds,
+                                   options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                   owner: self, userInfo: nil)
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHighlighted = true }
+    override func mouseExited(with event: NSEvent) { isHighlighted = false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isHighlighted {
+            NSColor.selectedContentBackgroundColor.setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 5, dy: 0), xRadius: 4, yRadius: 4).fill()
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        enclosingMenuItem?.menu?.cancelTracking()
+        onClick()
+    }
+}
+
 // MARK: - DesktopWindow
 
 private class DesktopWindow: NSWindow {
@@ -200,7 +299,7 @@ final class Display {
     }
 }
 
-class WallpaperController: NSObject {
+class WallpaperController: NSObject, NSMenuDelegate {
     let images: [URL]
     var displays: [String: Display] = [:]   // persists across disconnects
     var order: [String] = []                 // keys of connected displays, in screen order
@@ -219,6 +318,7 @@ class WallpaperController: NSObject {
     var autoCycleTimer: Timer?
     var autoCycleMenuItem: NSMenuItem!
     var autoCycleSliderView: IntervalSliderView!
+    var wallpaperMenuItems: [NSMenuItem] = []
 
     var connected: [Display] { order.compactMap { displays[$0] } }
 
@@ -349,13 +449,17 @@ class WallpaperController: NSObject {
         return t
     }
 
+    func currentImageURL(for display: Display) -> URL? {
+        let pool = activeImages(for: display)
+        guard !pool.isEmpty else { return nil }
+        return pool[display.imageIndex % pool.count]
+    }
+
     private func updateImages(_ target: Display? = nil) {
         let targets = target.map { [$0] } ?? connected
         for display in targets {
             guard let win = display.window else { continue }
-            let pool = activeImages(for: display)
-            guard !pool.isEmpty else { continue }
-            let url = pool[display.imageIndex % pool.count]
+            guard let url = currentImageURL(for: display) else { continue }
 
             if !blurEnabled {
                 let layer = win.contentView?.layer
@@ -419,6 +523,14 @@ class WallpaperController: NSObject {
 
         menu.addItem(.separator())
 
+        let wallpaperItem = NSMenuItem(title: "Current Wallpapers", action: nil, keyEquivalent: "")
+        let wallpaperSubmenu = NSMenu()
+        wallpaperSubmenu.delegate = self
+        wallpaperItem.submenu = wallpaperSubmenu
+        menu.addItem(wallpaperItem)
+
+        menu.addItem(.separator())
+
         blurMenuItem = NSMenuItem(title: "Blur", action: #selector(toggleBlur), keyEquivalent: "b")
         blurMenuItem.target = self
         menu.addItem(blurMenuItem)
@@ -451,6 +563,27 @@ class WallpaperController: NSObject {
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         statusItem.menu = menu
+    }
+
+    // Rebuilds the per-display wallpaper filename rows each time the menu
+    // opens, since the current image and connected displays can change
+    // between menu openings.
+    func menuWillOpen(_ menu: NSMenu) {
+        for item in wallpaperMenuItems { menu.removeItem(item) }
+        wallpaperMenuItems.removeAll()
+
+        for display in connected {
+            guard let url = currentImageURL(for: display) else { continue }
+            let displayName = display.window?.screen?.localizedName ?? "Display"
+
+            let row = WallpaperRowView(displayName: displayName, filename: url.lastPathComponent) {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+            let item = NSMenuItem()
+            item.view = row
+            menu.addItem(item)
+            wallpaperMenuItems.append(item)
+        }
     }
 
     // MARK: Actions
