@@ -6,6 +6,7 @@ import CoreImage
 import ImageIO
 import Metal
 import Network
+import ServiceManagement
 import SwiftUI
 
 // MARK: - Image collection
@@ -281,6 +282,34 @@ final class Settings: ObservableObject {
     }
 }
 
+// Start-at-login state. The system owns it (the user can also change it in
+// System Settings → Login Items), so it's read back from SMAppService
+// rather than saved in UserDefaults. Registration needs a real app bundle;
+// a bare binary run from the terminal can't be a login item.
+final class LoginItem: ObservableObject {
+    @Published private(set) var status = SMAppService.mainApp.status
+    @Published private(set) var error: String?
+
+    var isAvailable: Bool { Bundle.main.bundleIdentifier != nil }
+    var isEnabled: Bool { status == .enabled }
+
+    func refresh() { status = SMAppService.mainApp.status }
+
+    func setEnabled(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+        refresh()
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var settings: Settings
     @ObservedObject var httpStatus: HTTPStatus
@@ -294,7 +323,7 @@ struct SettingsView: View {
             SourcesSettingsView(settings: settings, overridden: sourcesOverridden)
                 .tabItem { Label("Sources", systemImage: "folder") }
         }
-        .frame(width: 480, height: 520)
+        .frame(width: 480, height: 600)
     }
 }
 
@@ -302,9 +331,29 @@ struct GeneralSettingsView: View {
     @ObservedObject var settings: Settings
     @ObservedObject var httpStatus: HTTPStatus
     var httpPortOverride: UInt16? = nil
+    @StateObject private var loginItem = LoginItem()
 
     var body: some View {
         Form {
+            Section {
+                Toggle("Start at login", isOn: Binding(get: { loginItem.isEnabled },
+                                                       set: { loginItem.setEnabled($0) }))
+                    .disabled(!loginItem.isAvailable)
+            } footer: {
+                if !loginItem.isAvailable {
+                    Text("Only available when running wp.app, not the bare binary.")
+                        .foregroundStyle(.secondary)
+                } else if loginItem.status == .requiresApproval {
+                    HStack {
+                        Text("Needs approval in System Settings → Login Items.")
+                            .foregroundStyle(.secondary)
+                        Button("Open") { SMAppService.openSystemSettingsLoginItems() }
+                            .buttonStyle(.link)
+                    }
+                } else if let error = loginItem.error {
+                    Text(error).foregroundStyle(.red)
+                }
+            }
             Section("Lock Screen") {
                 Toggle("Blur when the screen locks or sleeps", isOn: $settings.autoBlurOnLock)
             }
@@ -346,6 +395,11 @@ struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        // Pick up changes made in System Settings while the window was open.
+        .onAppear { loginItem.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            loginItem.refresh()
+        }
     }
 
     private var isListening: Bool {

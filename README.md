@@ -63,7 +63,8 @@ wp --version
 
 Settings are saved between launches.
 
-- **General**: blur when the screen locks or sleeps, auto cycle and its interval, HTTP API on/off and port.
+- **General**: start at login, blur when the screen locks or sleeps, auto cycle and its interval, HTTP API on/off and port.
+  Start at login registers `wp.app` as a login item, so move it to `/Applications` first; it's unavailable when running the bare binary.
 - **Sources**: add, remove and enable/disable image folders. Changes apply immediately.
 
 ## HTTP API

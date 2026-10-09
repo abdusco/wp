@@ -18,7 +18,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 sed "s/var version = \".*\"/var version = \"$VERSION_CLEAN\"/" main.swift > main.build.swift
 
 swiftc -target ${ARCH}-apple-macos13.0 -o "$APP/Contents/MacOS/wp" main.build.swift \
-  -framework AppKit -framework Foundation -framework CoreImage -framework Metal -framework Network -framework SwiftUI
+  -framework AppKit -framework Foundation -framework CoreImage -framework Metal -framework Network -framework ServiceManagement -framework SwiftUI
 
 rm main.build.swift
 
