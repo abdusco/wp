@@ -63,12 +63,14 @@ wp --version
 
 Settings are saved between launches.
 
-- **General**: blur when the screen locks or sleeps, auto cycle and its interval.
+- **General**: blur when the screen locks or sleeps, auto cycle and its interval, HTTP API on/off and port.
 - **Sources**: add, remove and enable/disable image folders. Changes apply immediately.
 
 ## HTTP API
 
-Set the `PORT` environment variable to enable the HTTP control server:
+Enable it in **Settings → General → HTTP API** and pick a port (default 9876). The status row shows whether the server is listening.
+
+When starting from the terminal, the `PORT` environment variable overrides the saved setting for that run:
 
 ```sh
 PORT=9876 wp ~/Pictures/wallpapers/
@@ -79,6 +81,10 @@ PORT=9876 wp ~/Pictures/wallpapers/
 | `GET /next` | Next image |
 | `GET /prev` | Previous image |
 | `GET /blur` | Toggle blur |
+
+Add `?current_display=true` to `/next` or `/prev` to change only the display under the cursor.
+
+The server listens on all network interfaces, so other devices on your network can reach it.
 
 ```sh
 curl localhost:9876/next

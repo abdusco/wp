@@ -111,6 +111,12 @@ func truncateFilename(_ name: String, maxLength: Int = 80) -> String {
 // MARK: - HTTP Server
 
 final class HTTPServer {
+    enum State: Equatable { case stopped, listening(UInt16), failed(String) }
+
+    // Called on the main thread. Not called for stop(), which the caller
+    // already knows about.
+    var onStateChange: (State) -> Void = { _ in }
+
     private let port: UInt16
     private let onNext: (CycleTarget) -> Void
     private let onPrev: (CycleTarget) -> Void
@@ -129,12 +135,19 @@ final class HTTPServer {
             listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: port)!)
         } catch {
             fputs("wp: http: \(error)\n", stderr)
+            report(.failed(Self.describe(error)))
             return
         }
 
-        listener?.stateUpdateHandler = { [port] state in
-            if case .ready = state { fputs("wp: http listening on :\(port)\n", stderr) }
-            if case .failed(let err) = state { fputs("wp: http: \(err)\n", stderr) }
+        listener?.stateUpdateHandler = { [weak self, port] state in
+            if case .ready = state {
+                fputs("wp: http listening on :\(port)\n", stderr)
+                self?.report(.listening(port))
+            }
+            if case .failed(let err) = state {
+                fputs("wp: http: \(err)\n", stderr)
+                self?.report(.failed(Self.describe(err)))
+            }
         }
 
         listener?.newConnectionHandler = { [weak self] conn in
@@ -143,6 +156,28 @@ final class HTTPServer {
         }
 
         listener?.start(queue: .global(qos: .background))
+    }
+
+    private func report(_ state: State) {
+        DispatchQueue.main.async { self.onStateChange(state) }
+    }
+
+    // NWError's description is "POSIXErrorCode(rawValue: 48): Address
+    // already in use"; keep only the readable part.
+    private static func describe(_ error: Error) -> String {
+        if case .posix(let code) = error as? NWError { return String(cString: strerror(code.rawValue)) }
+        return error.localizedDescription
+    }
+
+    // Cancelling is asynchronous and the port stays bound until it finishes,
+    // so a restart on the same port has to wait for `done`.
+    func stop(then done: @escaping () -> Void = {}) {
+        guard let listener else { done(); return }
+        listener.stateUpdateHandler = { state in
+            if case .cancelled = state { DispatchQueue.main.async(execute: done) }
+        }
+        listener.cancel()
+        self.listener = nil
     }
 
     private func handle(_ conn: NWConnection) {
@@ -171,6 +206,12 @@ final class HTTPServer {
             conn.send(content: Data(msg.utf8), completion: .contentProcessed { _ in conn.cancel() })
         }
     }
+}
+
+// Live server state for the settings window, kept apart from Settings since
+// it's runtime state rather than a preference.
+final class HTTPStatus: ObservableObject {
+    @Published var state: HTTPServer.State = .stopped
 }
 
 // MARK: - Cycle target
@@ -215,38 +256,52 @@ final class Settings: ObservableObject {
     @Published var autoCycleInterval: TimeInterval {
         didSet { defaults.set(autoCycleInterval, forKey: "autoCycleInterval") }
     }
+    @Published var httpEnabled: Bool {
+        didSet { defaults.set(httpEnabled, forKey: "httpEnabled") }
+    }
+    @Published var httpPort: Int {
+        didSet { defaults.set(httpPort, forKey: "httpPort") }
+    }
 
     init() {
         defaults.register(defaults: [
             "autoBlurOnLock": true,
             "autoCycle": false,
             "autoCycleInterval": 300.0,
+            "httpEnabled": false,
+            "httpPort": 9876,
         ])
         sources = defaults.data(forKey: "sources")
             .flatMap { try? JSONDecoder().decode([Source].self, from: $0) } ?? []
         autoBlurOnLock = defaults.bool(forKey: "autoBlurOnLock")
         autoCycle = defaults.bool(forKey: "autoCycle")
         autoCycleInterval = defaults.double(forKey: "autoCycleInterval")
+        httpEnabled = defaults.bool(forKey: "httpEnabled")
+        httpPort = defaults.integer(forKey: "httpPort")
     }
 }
 
 struct SettingsView: View {
     @ObservedObject var settings: Settings
+    @ObservedObject var httpStatus: HTTPStatus
     let sourcesOverridden: Bool
+    let httpPortOverride: UInt16?
 
     var body: some View {
         TabView {
-            GeneralSettingsView(settings: settings)
+            GeneralSettingsView(settings: settings, httpStatus: httpStatus, httpPortOverride: httpPortOverride)
                 .tabItem { Label("General", systemImage: "gearshape") }
             SourcesSettingsView(settings: settings, overridden: sourcesOverridden)
                 .tabItem { Label("Sources", systemImage: "folder") }
         }
-        .frame(width: 480, height: 400)
+        .frame(width: 480, height: 520)
     }
 }
 
 struct GeneralSettingsView: View {
     @ObservedObject var settings: Settings
+    @ObservedObject var httpStatus: HTTPStatus
+    var httpPortOverride: UInt16? = nil
 
     var body: some View {
         Form {
@@ -265,8 +320,45 @@ struct GeneralSettingsView: View {
                 }
                 .disabled(!settings.autoCycle)
             }
+            Section {
+                Toggle("Enable HTTP API", isOn: $settings.httpEnabled)
+                TextField("Port", value: $settings.httpPort, format: .number.grouping(.never))
+                    .disabled(!settings.httpEnabled)
+                LabeledContent("Status") {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(isListening ? Color.green : Color.red)
+                            .frame(width: 8, height: 8)
+                        Text(statusText)
+                    }
+                }
+            } header: {
+                Text("HTTP API")
+            } footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    if let httpPortOverride {
+                        Text("PORT=\(String(httpPortOverride)) is set in the environment, so the API runs on that port and these settings apply on the next launch without it.")
+                    }
+                    Text("GET /next, /prev, /blur. Add ?current_display=true to /next or /prev to change only the display under the cursor.")
+                    Text("Listens on all network interfaces, so other devices on your network can reach it.")
+                }
+                .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
+    }
+
+    private var isListening: Bool {
+        if case .listening = httpStatus.state { return true }
+        return false
+    }
+
+    private var statusText: String {
+        switch httpStatus.state {
+        case .stopped:              return "Stopped"
+        case .listening(let port):  return "Listening on port \(port)"
+        case .failed(let reason):   return "Failed: \(reason)"
+        }
     }
 
     // The slider moves over positions in autoCycleIntervals; the setting
@@ -479,6 +571,8 @@ class WallpaperController: NSObject, NSMenuDelegate {
     var shuffleMenuItem: NSMenuItem!
     var globalMonitor: Any?
     var httpServer: HTTPServer?
+    var httpGeneration = 0
+    let httpStatus = HTTPStatus()
     var autoCycleTimer: Timer?
     var wallpaperMenuItems: [NSMenuItem] = []
     let settings: Settings
@@ -533,7 +627,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
         syncScreens()
         setupMenu()
         setupMouseMonitor()
-        setupHTTPServer()
+        if let envPort { startHTTPServer(port: envPort) }
         setupLockScreenMonitor()
         observeSettings()
         NotificationCenter.default.addObserver(
@@ -952,11 +1046,28 @@ class WallpaperController: NSObject, NSMenuDelegate {
                 .sink { [weak self] paths in self?.setImages(collectImages(from: paths)) }
                 .store(in: &cancellables)
         }
+
+        // Ports outside UInt16 (or 0) are ignored rather than crashing the
+        // listener; the field shows what was typed until it's fixed.
+        if envPort == nil {
+            settings.$httpEnabled
+                .combineLatest(settings.$httpPort)
+                .removeDuplicates { $0 == $1 }
+                .sink { [weak self] enabled, port in
+                    if enabled, let port = UInt16(exactly: port), port > 0 {
+                        self?.startHTTPServer(port: port)
+                    } else {
+                        self?.stopHTTPServer()
+                    }
+                }
+                .store(in: &cancellables)
+        }
     }
 
     @objc func openSettings() {
         if settingsWindow == nil {
-            let view = SettingsView(settings: settings, sourcesOverridden: sourcesOverridden)
+            let view = SettingsView(settings: settings, httpStatus: httpStatus,
+                                    sourcesOverridden: sourcesOverridden, httpPortOverride: envPort)
             let win = NSWindow(contentViewController: NSHostingController(rootView: view))
             win.title = "wp Settings"
             win.styleMask = [.titled, .closable]
@@ -997,10 +1108,34 @@ class WallpaperController: NSObject, NSMenuDelegate {
 
     // MARK: HTTP server
 
-    private func setupHTTPServer() {
-        guard let portStr = ProcessInfo.processInfo.environment["PORT"],
-              let port = UInt16(portStr) else { return }
-        httpServer = HTTPServer(port: port,
+    // PORT in the environment wins over the saved setting, like paths on the
+    // command line do over saved sources.
+    let envPort = ProcessInfo.processInfo.environment["PORT"].flatMap { UInt16($0) }
+
+    // The new listener only starts once the old one has released its port.
+    // Rapid setting changes can queue several starts; the generation check
+    // lets only the latest one through.
+    private func startHTTPServer(port: UInt16) {
+        httpGeneration += 1
+        let generation = httpGeneration
+        let old = httpServer
+        httpServer = nil
+        let start = { [weak self] in
+            guard let self, self.httpGeneration == generation else { return }
+            self.makeHTTPServer(port: port)
+        }
+        if let old { old.stop(then: start) } else { start() }
+    }
+
+    private func stopHTTPServer() {
+        httpGeneration += 1
+        httpServer?.stop()
+        httpServer = nil
+        httpStatus.state = .stopped
+    }
+
+    private func makeHTTPServer(port: UInt16) {
+        let server = HTTPServer(port: port,
                                 onNext: { [weak self] target in
                                     guard let self else { return }
                                     let display = target == .currentDisplay ? self.displayUnderCursor() : nil
@@ -1012,7 +1147,14 @@ class WallpaperController: NSObject, NSMenuDelegate {
                                     self.cycleImage(delta: -1, display: display)
                                 },
                                 onBlur: { [weak self] in self?.toggleBlur() })
-        httpServer?.start()
+        // Only the current server may update the status, not one that's
+        // being replaced.
+        server.onStateChange = { [weak self, weak server] state in
+            guard let self, let server, self.httpServer === server else { return }
+            self.httpStatus.state = state
+        }
+        httpServer = server
+        server.start()
     }
 
     // MARK: Double-click monitor
@@ -1071,7 +1213,8 @@ With no arguments, images come from the folders set in Settings → Sources.
   --help, -h      Show this help and exit
 
 Environment:
-  PORT            If set, starts an HTTP server on this port for remote control:
+  PORT            If set, starts an HTTP server on this port for remote control,
+                  overriding Settings → General → HTTP API for this run:
                      /next   Show the next image (add ?current_display=true to target only the display under the cursor)
                      /prev   Show the previous image (same query param supported)
                      /blur   Toggle blur
