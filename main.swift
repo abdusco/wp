@@ -493,32 +493,98 @@ class WallpaperController: NSObject, NSMenuDelegate {
             guard let win = display.window else { continue }
             guard let slide = currentSlide(for: display), let url = slide.first else { continue }
 
-            if !blurEnabled {
+            if !blurEnabled && slide.count == 1 {
                 let layer = win.contentView?.layer
                 layer?.add(fadeTransition(), forKey: "transition")
                 layer?.contents = NSImage(contentsOf: url)
                 continue
             }
 
-            if let cached = blurCache[slide] {
+            if blurEnabled, let cached = blurCache[slide] {
                 let layer = win.contentView?.layer
                 layer?.add(fadeTransition(), forKey: "transition")
                 layer?.contents = cached
                 continue
             }
 
-            DispatchQueue.global(qos: .userInitiated).async { [weak self, weak win] in
+            // Compositing and blurring are too slow for the main thread.
+            // Rapid next/prev can finish renders out of order, so a result is
+            // dropped if the display has moved on to another slide meanwhile.
+            let blur = blurEnabled
+            let size = win.frame.size
+            let scale = win.backingScaleFactor
+            DispatchQueue.global(qos: .userInitiated).async { [weak self, weak win, weak display] in
                 guard let self,
-                      let img = NSImage(contentsOf: url),
-                      let blurred = self.blurImage(img, sigma: 200) else { return }
+                      let img = self.renderSlide(slide, size: size, scale: scale),
+                      let out = blur ? self.blurImage(img, sigma: 200) : img else { return }
                 DispatchQueue.main.async {
-                    self.blurCache[slide] = blurred
+                    if blur { self.blurCache[slide] = out }
+                    guard let display, self.currentSlide(for: display) == slide else { return }
                     let layer = win?.contentView?.layer
                     layer?.add(self.fadeTransition(), forKey: "transition")
-                    layer?.contents = blurred
+                    layer?.contents = out
                 }
             }
         }
+    }
+
+    private func renderSlide(_ slide: Slide, size: CGSize, scale: CGFloat) -> NSImage? {
+        if slide.count == 1 { return NSImage(contentsOf: slide[0]) }
+        let pixelSize = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
+        guard let cg = composite(slide, pixelSize: pixelSize) else { return nil }
+        return NSImage(cgImage: cg, size: size)
+    }
+
+    // Draws a slide's images side by side into one screen-sized image. Each
+    // image gets a slot whose width is proportional to its aspect ratio, then
+    // is aspect-filled into that slot, so a well-matched group crops little.
+    private func composite(_ slide: Slide, pixelSize: CGSize) -> CGImage? {
+        guard let ctx = CGContext(data: nil,
+                                  width: Int(pixelSize.width), height: Int(pixelSize.height),
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { return nil }
+        ctx.setFillColor(.black)
+        ctx.fill(CGRect(origin: .zero, size: pixelSize))
+        ctx.interpolationQuality = .high
+
+        let aspects = slide.map { self.aspects[$0] ?? 1 }
+        let total = aspects.reduce(0, +)
+        var cumulative: CGFloat = 0
+
+        for (url, aspect) in zip(slide, aspects) {
+            // Slot edges come from the running sum so rounding never leaves
+            // a gap at the right edge.
+            let left = (pixelSize.width * cumulative / total).rounded()
+            cumulative += aspect
+            let right = (pixelSize.width * cumulative / total).rounded()
+            let slot = CGRect(x: left, y: 0, width: right - left, height: pixelSize.height)
+
+            // Aspect-fill: match whichever side leaves no gap, overflow the other.
+            let drawn = aspect > slot.width / slot.height
+                ? CGSize(width: slot.height * aspect, height: slot.height)
+                : CGSize(width: slot.width, height: slot.width / aspect)
+            let rect = CGRect(x: slot.midX - drawn.width / 2, y: slot.midY - drawn.height / 2,
+                              width: drawn.width, height: drawn.height)
+
+            // The thumbnail API applies EXIF orientation and decodes at the
+            // drawn size instead of full resolution.
+            let opts: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: Int(max(drawn.width, drawn.height).rounded(.up)),
+            ]
+            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
+            else { continue }
+
+            ctx.saveGState()
+            ctx.clip(to: slot)
+            ctx.draw(img, in: rect)
+            ctx.restoreGState()
+        }
+        return ctx.makeImage()
     }
 
     private func blurImage(_ image: NSImage, sigma: Double) -> NSImage? {
