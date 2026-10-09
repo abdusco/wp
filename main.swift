@@ -48,6 +48,12 @@ func imageAspect(_ url: URL) -> CGFloat? {
     return (5...8).contains(orientation) ? CGFloat(h / w) : CGFloat(w / h)
 }
 
+// A missing entry means the header couldn't be read; callers treat it as wide.
+func readAspects(_ urls: [URL]) -> [URL: CGFloat] {
+    Dictionary(urls.compactMap { url in imageAspect(url).map { (url, $0) } },
+               uniquingKeysWith: { first, _ in first })
+}
+
 // Groups portrait images into side-by-side slides for a screen of the given
 // aspect; wide images stay alone. Portraits are chunked in order and each
 // group sits where its first member was, so the overall order is kept.
@@ -359,8 +365,8 @@ final class Display {
 }
 
 class WallpaperController: NSObject, NSMenuDelegate {
-    let images: [URL]
-    let aspects: [URL: CGFloat]              // missing entry = unreadable header, treated as wide
+    private(set) var images: [URL]
+    private(set) var aspects: [URL: CGFloat] // missing entry = unreadable header, treated as wide
     var displays: [String: Display] = [:]   // persists across disconnects
     var order: [String] = []                 // keys of connected displays, in screen order
     var blurEnabled = false
@@ -397,6 +403,20 @@ class WallpaperController: NSObject, NSMenuDelegate {
         } ?? 0
     }
 
+    // Replaces the image list at runtime, e.g. after sources change. Each
+    // display gets a fresh shuffle but stays on its current image if that
+    // image is still in the list.
+    func setImages(_ urls: [URL]) {
+        images = urls
+        aspects = readAspects(urls)
+        blurCache.removeAll()
+        for display in displays.values {
+            display.shuffled = urls.shuffled()
+            rebuildSlides(for: display)
+        }
+        updateImages()
+    }
+
     lazy var ciContext: CIContext = {
         if let device = MTLCreateSystemDefaultDevice() {
             return CIContext(mtlDevice: device)
@@ -406,10 +426,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
 
     init(images: [URL]) {
         self.images = images
-        self.aspects = Dictionary(
-            images.compactMap { url in imageAspect(url).map { (url, $0) } },
-            uniquingKeysWith: { first, _ in first }
-        )
+        self.aspects = readAspects(images)
         super.init()
         syncScreens()
         setupMenu()
@@ -542,7 +559,10 @@ class WallpaperController: NSObject, NSMenuDelegate {
         let targets = target.map { [$0] } ?? connected
         for display in targets {
             guard let win = display.window else { continue }
-            guard let slide = currentSlide(for: display), let url = slide.first else { continue }
+            guard let slide = currentSlide(for: display), let url = slide.first else {
+                win.contentView?.layer?.contents = nil
+                continue
+            }
 
             if !blurEnabled && slide.count == 1 && !isPortrait(url) {
                 let layer = win.contentView?.layer
