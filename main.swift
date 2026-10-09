@@ -568,47 +568,77 @@ struct GeneralSettingsView: View {
     }
 }
 
+// The standard macOS editable list: a bordered list with a + / − button bar
+// along its bottom edge. − (or Delete) removes the selected rows.
 struct SourcesSettingsView: View {
     @ObservedObject var settings: Settings
     let overridden: Bool
+    @State private var selection: Set<String> = []
 
     var body: some View {
-        Form {
-            Section {
-                if settings.sources.isEmpty {
-                    Text("No folders yet.").foregroundStyle(.secondary)
-                }
-                // Rows look sources up by id rather than binding by index,
-                // since removing a row while SwiftUI still holds an index
-                // binding to it can crash.
-                ForEach(settings.sources) { source in
-                    HStack {
-                        Toggle(isOn: enabledBinding(for: source.id)) {
-                            Text(URL(fileURLWithPath: source.path).lastPathComponent)
-                            Text((source.path as NSString).abbreviatingWithTildeInPath)
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(spacing: 0) {
+                List(selection: $selection) {
+                    // Rows look sources up by id rather than binding by
+                    // index, since removing a row while SwiftUI still holds
+                    // an index binding to it can crash.
+                    ForEach(settings.sources) { source in
+                        HStack(spacing: 8) {
+                            Toggle("Enabled", isOn: enabledBinding(for: source.id))
+                                .toggleStyle(.checkbox)
+                                .labelsHidden()
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(URL(fileURLWithPath: source.path).lastPathComponent)
+                                Text((source.path as NSString).abbreviatingWithTildeInPath)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
-                        Button {
-                            settings.sources.removeAll { $0.id == source.id }
-                        } label: {
-                            Image(systemName: "minus.circle")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Remove")
+                        .padding(.vertical, 2)
                     }
                 }
-            } header: {
-                Text("Folders")
-            } footer: {
-                if overridden {
-                    Text("Paths passed on the command line are in use. Changes here apply on the next launch without arguments.")
-                        .foregroundStyle(.secondary)
+                .listStyle(.plain)
+                .onDeleteCommand(perform: removeSelected)
+                .overlay {
+                    if settings.sources.isEmpty {
+                        Text("No folders yet").foregroundStyle(.secondary)
+                    }
                 }
+
+                Divider()
+                HStack(spacing: 0) {
+                    Button(action: addFolders) {
+                        Image(systemName: "plus").frame(width: 24, height: 20)
+                    }
+                    .help("Add folders")
+                    Divider().frame(height: 14)
+                    Button(action: removeSelected) {
+                        Image(systemName: "minus").frame(width: 24, height: 20)
+                    }
+                    .help("Remove selected folders")
+                    .disabled(selection.isEmpty)
+                    Spacer()
+                }
+                .buttonStyle(.borderless)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
             }
-            Section {
-                Button("Add Folder…", action: addFolders)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(nsColor: .separatorColor)))
+
+            if overridden {
+                Text("Paths passed on the command line are in use. Changes here apply on the next launch without arguments.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
         }
-        .formStyle(.grouped)
+        .padding(20)
+    }
+
+    private func removeSelected() {
+        settings.sources.removeAll { selection.contains($0.id) }
+        selection = []
     }
 
     private func enabledBinding(for id: String) -> Binding<Bool> {
