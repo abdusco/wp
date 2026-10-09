@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import CoreGraphics
 import CoreImage
+import ImageIO
 import Metal
 import Network
 
@@ -30,6 +31,21 @@ func collectImages(from paths: [String]) -> [URL] {
         }
     }
     return result
+}
+
+// Returns the displayed width/height ratio, reading only the file header so
+// it stays cheap for large folders. EXIF orientations 5–8 are rotated 90°
+// (common for phone portraits stored as landscape pixels), so width and
+// height swap.
+func imageAspect(_ url: URL) -> CGFloat? {
+    guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+          let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+          let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+          let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue,
+          w > 0, h > 0
+    else { return nil }
+    let orientation = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+    return (5...8).contains(orientation) ? CGFloat(h / w) : CGFloat(w / h)
 }
 
 // Truncates a filename to at most `maxLength` characters, eliding the middle
@@ -307,6 +323,7 @@ final class Display {
 
 class WallpaperController: NSObject, NSMenuDelegate {
     let images: [URL]
+    let aspects: [URL: CGFloat]              // missing entry = unreadable header, treated as wide
     var displays: [String: Display] = [:]   // persists across disconnects
     var order: [String] = []                 // keys of connected displays, in screen order
     var blurEnabled = false
@@ -345,6 +362,10 @@ class WallpaperController: NSObject, NSMenuDelegate {
 
     init(images: [URL]) {
         self.images = images
+        self.aspects = Dictionary(
+            images.compactMap { url in imageAspect(url).map { (url, $0) } },
+            uniquingKeysWith: { first, _ in first }
+        )
         super.init()
         syncScreens()
         setupMenu()
