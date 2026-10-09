@@ -255,15 +255,30 @@ struct GeneralSettingsView: View {
             }
             Section("Auto Cycle") {
                 Toggle("Cycle images automatically", isOn: $settings.autoCycle)
-                Picker("Interval", selection: $settings.autoCycleInterval) {
-                    ForEach(autoCycleIntervals.indices, id: \.self) { i in
-                        Text(autoCycleIntervals[i].label).tag(autoCycleIntervals[i].seconds)
+                LabeledContent("Interval") {
+                    HStack {
+                        Slider(value: intervalIndex, in: 0...Double(autoCycleIntervals.count - 1), step: 1)
+                        Text(autoCycleIntervals[Int(intervalIndex.wrappedValue)].label)
+                            .monospacedDigit()
+                            .frame(width: 32, alignment: .trailing)
                     }
                 }
                 .disabled(!settings.autoCycle)
             }
         }
         .formStyle(.grouped)
+    }
+
+    // The slider moves over positions in autoCycleIntervals; the setting
+    // itself is stored in seconds. An unknown saved value shows as 5m.
+    private var intervalIndex: Binding<Double> {
+        Binding(
+            get: {
+                let i = autoCycleIntervals.firstIndex { $0.seconds == settings.autoCycleInterval } ?? 4
+                return Double(i)
+            },
+            set: { settings.autoCycleInterval = autoCycleIntervals[Int($0.rounded())].seconds }
+        )
     }
 }
 
