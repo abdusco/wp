@@ -544,7 +544,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
             guard let win = display.window else { continue }
             guard let slide = currentSlide(for: display), let url = slide.first else { continue }
 
-            if !blurEnabled && slide.count == 1 {
+            if !blurEnabled && slide.count == 1 && !isPortrait(url) {
                 let layer = win.contentView?.layer
                 layer?.add(fadeTransition(), forKey: "transition")
                 layer?.contents = NSImage(contentsOf: url)
@@ -579,16 +579,42 @@ class WallpaperController: NSObject, NSMenuDelegate {
         }
     }
 
+    private func isPortrait(_ url: URL) -> Bool { (aspects[url] ?? 1) < 1 }
+
     private func renderSlide(_ slide: Slide, size: CGSize, scale: CGFloat) -> NSImage? {
-        if slide.count == 1 { return NSImage(contentsOf: slide[0]) }
+        if slide.count == 1 && !isPortrait(slide[0]) { return NSImage(contentsOf: slide[0]) }
         let pixelSize = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
         guard let cg = composite(slide, pixelSize: pixelSize) else { return nil }
         return NSImage(cgImage: cg, size: size)
     }
 
+    // The thumbnail API applies EXIF orientation and decodes at the requested
+    // size instead of full resolution.
+    private func loadThumbnail(_ url: URL, maxPixelSize: CGFloat) -> CGImage? {
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(maxPixelSize.rounded(.up)),
+        ]
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
+    }
+
+    // Centers an image of the given aspect in `box`. Fill covers the box and
+    // overflows one side; fit stays inside it and leaves bars on one side.
+    private func placed(aspect: CGFloat, in box: CGRect, fill: Bool) -> CGRect {
+        let widthLimited = (aspect > box.width / box.height) != fill
+        let size = widthLimited
+            ? CGSize(width: box.width, height: box.width / aspect)
+            : CGSize(width: box.height * aspect, height: box.height)
+        return CGRect(x: box.midX - size.width / 2, y: box.midY - size.height / 2,
+                      width: size.width, height: size.height)
+    }
+
     // Draws a slide's images side by side into one screen-sized image. Each
     // image gets a slot whose width is proportional to its aspect ratio, then
     // is aspect-filled into that slot, so a well-matched group crops little.
+    // A portrait alone is fitted whole over a blurred, stretched copy of itself.
     private func composite(_ slide: Slide, pixelSize: CGSize) -> CGImage? {
         guard let ctx = CGContext(data: nil,
                                   width: Int(pixelSize.width), height: Int(pixelSize.height),
@@ -600,7 +626,26 @@ class WallpaperController: NSObject, NSMenuDelegate {
         ctx.fill(CGRect(origin: .zero, size: pixelSize))
         ctx.interpolationQuality = .high
 
+        let canvas = CGRect(origin: .zero, size: pixelSize)
         let aspects = slide.map { self.aspects[$0] ?? 1 }
+
+        if slide.count == 1 {
+            let url = slide[0], aspect = aspects[0]
+            // The backdrop is blurred anyway, so a small decode is enough.
+            if let small = loadThumbnail(url, maxPixelSize: 256) {
+                let ci = CIImage(cgImage: small)
+                let blurred = ci.clampedToExtent().applyingGaussianBlur(sigma: 12).cropped(to: ci.extent)
+                if let bg = ciContext.createCGImage(blurred, from: ci.extent) {
+                    ctx.draw(bg, in: placed(aspect: aspect, in: canvas, fill: true))
+                }
+            }
+            let rect = placed(aspect: aspect, in: canvas, fill: false)
+            if let img = loadThumbnail(url, maxPixelSize: max(rect.width, rect.height)) {
+                ctx.draw(img, in: rect)
+            }
+            return ctx.makeImage()
+        }
+
         let total = aspects.reduce(0, +)
         var cumulative: CGFloat = 0
 
@@ -612,23 +657,8 @@ class WallpaperController: NSObject, NSMenuDelegate {
             let right = (pixelSize.width * cumulative / total).rounded()
             let slot = CGRect(x: left, y: 0, width: right - left, height: pixelSize.height)
 
-            // Aspect-fill: match whichever side leaves no gap, overflow the other.
-            let drawn = aspect > slot.width / slot.height
-                ? CGSize(width: slot.height * aspect, height: slot.height)
-                : CGSize(width: slot.width, height: slot.width / aspect)
-            let rect = CGRect(x: slot.midX - drawn.width / 2, y: slot.midY - drawn.height / 2,
-                              width: drawn.width, height: drawn.height)
-
-            // The thumbnail API applies EXIF orientation and decodes at the
-            // drawn size instead of full resolution.
-            let opts: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: Int(max(drawn.width, drawn.height).rounded(.up)),
-            ]
-            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-                  let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
-            else { continue }
+            let rect = placed(aspect: aspect, in: slot, fill: true)
+            guard let img = loadThumbnail(url, maxPixelSize: max(rect.width, rect.height)) else { continue }
 
             ctx.saveGState()
             ctx.clip(to: slot)
