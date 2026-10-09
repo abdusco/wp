@@ -1265,41 +1265,40 @@ class WallpaperController: NSObject, NSMenuDelegate {
 
         let menu = NSMenu()
 
-        let prev = NSMenuItem(title: "Previous Image", action: #selector(prevImage), keyEquivalent: "[")
-        prev.target = self
-        menu.addItem(prev)
+        // macOS 26 adds icons on its own to standard items like Settings… and
+        // Quit, which indents their titles past items without one. Giving
+        // every item an icon keeps the titles aligned on all versions.
+        func item(_ title: String, _ symbol: String, _ action: Selector?, _ key: String,
+                  target: AnyObject? = nil) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.target = target ?? self
+            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            menu.addItem(item)
+            return item
+        }
 
-        let next = NSMenuItem(title: "Next Image", action: #selector(nextImage), keyEquivalent: "]")
-        next.target = self
-        menu.addItem(next)
+        _ = item("Previous Image", "chevron.backward", #selector(prevImage), "[")
+        _ = item("Next Image", "chevron.forward", #selector(nextImage), "]")
 
         menu.addItem(.separator())
 
-        let wallpaperItem = NSMenuItem(title: "Current Wallpapers", action: nil, keyEquivalent: "")
+        let wallpaperItem = item("Current Wallpapers", "photo.on.rectangle", nil, "")
         let wallpaperSubmenu = NSMenu()
         wallpaperSubmenu.delegate = self
         wallpaperItem.submenu = wallpaperSubmenu
-        menu.addItem(wallpaperItem)
 
         menu.addItem(.separator())
 
-        blurMenuItem = NSMenuItem(title: "Blur", action: #selector(toggleBlur), keyEquivalent: "b")
-        blurMenuItem.target = self
-        menu.addItem(blurMenuItem)
-
-        shuffleMenuItem = NSMenuItem(title: "Shuffle", action: #selector(toggleShuffle), keyEquivalent: "s")
-        shuffleMenuItem.target = self
+        blurMenuItem = item("Blur", "drop", #selector(toggleBlur), "b")
+        shuffleMenuItem = item("Shuffle", "shuffle", #selector(toggleShuffle), "s")
         shuffleMenuItem.state = .on
-        menu.addItem(shuffleMenuItem)
 
         menu.addItem(.separator())
 
-        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
-        settingsItem.target = self
-        menu.addItem(settingsItem)
+        _ = item("Settings…", "gearshape", #selector(openSettings), ",")
 
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        _ = item("Quit", "xmark.square", #selector(NSApplication.terminate(_:)), "q", target: NSApp)
 
         statusItem.menu = menu
     }
