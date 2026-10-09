@@ -1,4 +1,4 @@
-name: Swift Release Binaries
+name: Swift Release
 
 on:
   push:
@@ -28,16 +28,16 @@ jobs:
           export ARCH="${{ matrix.arch }}"
           ./build.sh
 
-      - name: Package binary for release
+      - name: Package app for release
         run: |
           mkdir -p release
-          cp wp-${{ matrix.arch }} release/wp-${{ matrix.arch }}
+          ditto -c -k --keepParent build/${{ matrix.arch }}/wp.app release/wp-${{ matrix.arch }}.zip
 
-      - name: Upload binary artifact
+      - name: Upload app artifact
         uses: actions/upload-artifact@v4
         with:
           name: wp-${{ matrix.arch }}
-          path: release/wp-${{ matrix.arch }}
+          path: release/wp-${{ matrix.arch }}.zip
           retention-days: 1
 
   release:

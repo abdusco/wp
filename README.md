@@ -1,4 +1,6 @@
-# wp
+<p align="center"><img src="assets/icon.svg" width="160" alt="wp"></p>
+
+<h1 align="center">wp</h1>
 
 A minimal macOS wallpaper switcher. Displays images across all monitors, sits below Finder's desktop layer, and stays out of your way.
 
@@ -14,11 +16,12 @@ A minimal macOS wallpaper switcher. Displays images across all monitors, sits be
 
 ## Install
 
-Download a pre-built binary from [Releases](../../releases) and put it in your `PATH`:
+Download `wp-arm64.zip` (or `wp-x86_64.zip`) from [Releases](../../releases), unzip it and move `wp.app` to `/Applications`.
+
+The app is ad-hoc signed, not notarized, so clear the quarantine flag once:
 
 ```sh
-mv wp-arm64 /usr/local/bin/wp
-chmod +x /usr/local/bin/wp
+xattr -dr com.apple.quarantine /Applications/wp.app
 ```
 
 Or build from source:
@@ -30,6 +33,7 @@ Or build from source:
 ## Usage
 
 ```sh
+alias wp=/Applications/wp.app/Contents/MacOS/wp
 wp ~/Pictures/wallpapers/
 wp ~/Pictures/wallpapers/ ~/Downloads/photo.jpg
 ```
@@ -72,7 +76,7 @@ curl localhost:9876/next
 
 ```sh
 ARCH=arm64 VERSION=1.0.0 ./build.sh
-# produces: wp-arm64
+# produces: build/arm64/wp.app
 ```
 
 Supported architectures: `arm64`, `x86_64`.
