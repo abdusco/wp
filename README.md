@@ -55,12 +55,13 @@ wp --version
 
 | Action | Effect |
 |---|---|
-| Status bar → Next Image (`]`) | Advance to next image |
-| Status bar → Previous Image (`[`) | Go back one image |
-| Status bar → Blur (`b`) | Toggle blur |
-| Status bar → Shuffle (`s`) | Toggle shuffle (reshuffles on enable) |
+| Status bar → Next Image | Advance to next image |
+| Status bar → Previous Image | Go back one image |
+| Status bar → Blur | Toggle blur |
+| Status bar → Shuffle | Toggle shuffle (reshuffles on enable) |
 | Double-click desktop | Toggle blur |
-| Status bar → Settings… (`,`) | Open the settings window |
+| Status bar → Settings… (`⌘,`) | Open the settings window |
+| Global hotkeys | Set your own in Settings → Hotkeys |
 
 ## Settings
 

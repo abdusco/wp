@@ -1277,8 +1277,10 @@ class WallpaperController: NSObject, NSMenuDelegate {
             return item
         }
 
-        _ = item("Previous Image", "chevron.backward", #selector(prevImage), "[")
-        _ = item("Next Image", "chevron.forward", #selector(nextImage), "]")
+        // Actions that have configurable global hotkeys get no key
+        // equivalent here; a fixed one would contradict the Hotkeys tab.
+        _ = item("Previous Image", "chevron.backward", #selector(prevImage), "")
+        _ = item("Next Image", "chevron.forward", #selector(nextImage), "")
 
         menu.addItem(.separator())
 
@@ -1289,8 +1291,8 @@ class WallpaperController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        blurMenuItem = item("Blur", "drop", #selector(toggleBlur), "b")
-        shuffleMenuItem = item("Shuffle", "shuffle", #selector(toggleShuffle), "s")
+        blurMenuItem = item("Blur", "drop", #selector(toggleBlur), "")
+        shuffleMenuItem = item("Shuffle", "shuffle", #selector(toggleShuffle), "")
         shuffleMenuItem.state = .on
 
         menu.addItem(.separator())
