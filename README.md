@@ -10,7 +10,7 @@ A minimal macOS wallpaper switcher. Displays images across all monitors, sits be
 - Crossfade transitions between images
 - Blur mode (GPU-accelerated via Metal + CoreImage)
 - Shuffle mode
-- Status bar menu
+- Status bar menu and settings window
 - Double-click the desktop to toggle blur
 - HTTP API for remote control
 
@@ -53,6 +53,13 @@ wp --version
 | Status bar → Blur (`b`) | Toggle blur |
 | Status bar → Shuffle (`s`) | Toggle shuffle (reshuffles on enable) |
 | Double-click desktop | Toggle blur |
+| Status bar → Settings… (`,`) | Open the settings window |
+
+## Settings
+
+Settings are saved between launches.
+
+- **General**: blur when the screen locks or sleeps, auto cycle and its interval.
 
 ## HTTP API
 

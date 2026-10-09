@@ -17,8 +17,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 sed "s/var version = \".*\"/var version = \"$VERSION_CLEAN\"/" main.swift > main.build.swift
 
-swiftc -target ${ARCH}-apple-macos12.0 -o "$APP/Contents/MacOS/wp" main.build.swift \
-  -framework AppKit -framework Foundation -framework CoreImage -framework Metal -framework Network
+swiftc -target ${ARCH}-apple-macos13.0 -o "$APP/Contents/MacOS/wp" main.build.swift \
+  -framework AppKit -framework Foundation -framework CoreImage -framework Metal -framework Network -framework SwiftUI
 
 rm main.build.swift
 
@@ -46,7 +46,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundlePackageType</key>        <string>APPL</string>
   <key>CFBundleShortVersionString</key> <string>${VERSION_CLEAN}</string>
   <key>CFBundleVersion</key>            <string>${VERSION_CLEAN}</string>
-  <key>LSMinimumSystemVersion</key>     <string>12.0</string>
+  <key>LSMinimumSystemVersion</key>     <string>13.0</string>
   <key>LSUIElement</key>                <true/>
   <key>NSHighResolutionCapable</key>    <true/>
 </dict>

@@ -1,10 +1,12 @@
 import AppKit
+import Combine
 import Foundation
 import CoreGraphics
 import CoreImage
 import ImageIO
 import Metal
 import Network
+import SwiftUI
 
 // MARK: - Image collection
 
@@ -184,65 +186,66 @@ let autoCycleIntervals: [(label: String, seconds: TimeInterval)] = [
     ("6h", 21600), ("12h", 43200), ("24h", 86400)
 ]
 
-// MARK: - IntervalSliderView
+// MARK: - Settings
 
-final class IntervalSliderView: NSView {
-    var onChange: (Int) -> Void = { _ in }
+// User preferences, persisted in UserDefaults. The settings window edits
+// these directly; the controller subscribes to the ones it acts on.
+final class Settings: ObservableObject {
+    private let defaults = UserDefaults.standard
 
-    private let slider: NSSlider
-    private let label: NSTextField
+    @Published var autoBlurOnLock: Bool {
+        didSet { defaults.set(autoBlurOnLock, forKey: "autoBlurOnLock") }
+    }
+    @Published var autoCycle: Bool {
+        didSet { defaults.set(autoCycle, forKey: "autoCycle") }
+    }
+    @Published var autoCycleInterval: TimeInterval {
+        didSet { defaults.set(autoCycleInterval, forKey: "autoCycleInterval") }
+    }
 
-    init(initialIndex: Int, onChange: @escaping (Int) -> Void) {
-        self.onChange = onChange
-
-        slider = NSSlider()
-        slider.minValue = 0
-        slider.maxValue = Double(autoCycleIntervals.count - 1)
-        slider.numberOfTickMarks = autoCycleIntervals.count
-        slider.allowsTickMarkValuesOnly = true
-        slider.integerValue = initialIndex
-        slider.controlSize = .small
-        slider.translatesAutoresizingMaskIntoConstraints = false
-
-        label = NSTextField(labelWithString: autoCycleIntervals[initialIndex].label)
-        label.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
-        label.alignment = .right
-        label.translatesAutoresizingMaskIntoConstraints = false
-
-        super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
-
-        addSubview(slider)
-        addSubview(label)
-
-        NSLayoutConstraint.activate([
-            widthAnchor.constraint(greaterThanOrEqualToConstant: 200),
-            heightAnchor.constraint(equalToConstant: 34),
-
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            label.widthAnchor.constraint(equalToConstant: 32),
-
-            slider.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            slider.trailingAnchor.constraint(equalTo: label.leadingAnchor, constant: -6),
-            slider.centerYAnchor.constraint(equalTo: centerYAnchor),
+    init() {
+        defaults.register(defaults: [
+            "autoBlurOnLock": true,
+            "autoCycle": false,
+            "autoCycleInterval": 300.0,
         ])
-
-        slider.target = self
-        slider.action = #selector(sliderChanged(_:))
+        autoBlurOnLock = defaults.bool(forKey: "autoBlurOnLock")
+        autoCycle = defaults.bool(forKey: "autoCycle")
+        autoCycleInterval = defaults.double(forKey: "autoCycleInterval")
     }
+}
 
-    required init?(coder: NSCoder) { fatalError() }
+struct SettingsView: View {
+    @ObservedObject var settings: Settings
 
-    @objc private func sliderChanged(_ sender: NSSlider) {
-        let idx = sender.integerValue
-        label.stringValue = autoCycleIntervals[idx].label
-        onChange(idx)
+    var body: some View {
+        TabView {
+            GeneralSettingsView(settings: settings)
+                .tabItem { Label("General", systemImage: "gearshape") }
+        }
+        .frame(width: 480, height: 400)
     }
+}
 
-    func setEnabled(_ enabled: Bool) {
-        slider.isEnabled = enabled
-        label.alphaValue = enabled ? 1 : 0.4
+struct GeneralSettingsView: View {
+    @ObservedObject var settings: Settings
+
+    var body: some View {
+        Form {
+            Section("Lock Screen") {
+                Toggle("Blur when the screen locks or sleeps", isOn: $settings.autoBlurOnLock)
+            }
+            Section("Auto Cycle") {
+                Toggle("Cycle images automatically", isOn: $settings.autoCycle)
+                Picker("Interval", selection: $settings.autoCycleInterval) {
+                    ForEach(autoCycleIntervals.indices, id: \.self) { i in
+                        Text(autoCycleIntervals[i].label).tag(autoCycleIntervals[i].seconds)
+                    }
+                }
+                .disabled(!settings.autoCycle)
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 
@@ -377,14 +380,11 @@ class WallpaperController: NSObject, NSMenuDelegate {
     var shuffleMenuItem: NSMenuItem!
     var globalMonitor: Any?
     var httpServer: HTTPServer?
-    var autoBlurOnLockEnabled = true
-    var autoBlurOnLockMenuItem: NSMenuItem!
-    var autoCycleEnabled = false
-    var autoCycleIntervalIndex = 4
     var autoCycleTimer: Timer?
-    var autoCycleMenuItem: NSMenuItem!
-    var autoCycleSliderView: IntervalSliderView!
     var wallpaperMenuItems: [NSMenuItem] = []
+    let settings = Settings()
+    var settingsWindow: NSWindow?
+    var cancellables: Set<AnyCancellable> = []
 
     var connected: [Display] { order.compactMap { displays[$0] } }
 
@@ -433,6 +433,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
         setupMouseMonitor()
         setupHTTPServer()
         setupLockScreenMonitor()
+        observeSettings()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(screensChanged),
@@ -741,22 +742,9 @@ class WallpaperController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        autoBlurOnLockMenuItem = NSMenuItem(title: "Auto Blur on Lock", action: #selector(toggleAutoBlurOnLock), keyEquivalent: "")
-        autoBlurOnLockMenuItem.target = self
-        autoBlurOnLockMenuItem.state = autoBlurOnLockEnabled ? .on : .off
-        menu.addItem(autoBlurOnLockMenuItem)
-
-        autoCycleMenuItem = NSMenuItem(title: "Auto Cycle", action: #selector(toggleAutoCycle), keyEquivalent: "a")
-        autoCycleMenuItem.target = self
-        menu.addItem(autoCycleMenuItem)
-
-        autoCycleSliderView = IntervalSliderView(initialIndex: autoCycleIntervalIndex) { [weak self] idx in
-            self?.setAutoCycleInterval(idx)
-        }
-        autoCycleSliderView.setEnabled(false)
-        let sliderItem = NSMenuItem()
-        sliderItem.view = autoCycleSliderView
-        menu.addItem(sliderItem)
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
 
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -824,21 +812,8 @@ class WallpaperController: NSObject, NSMenuDelegate {
         updateImages()
     }
 
-    @objc func toggleAutoCycle() {
-        autoCycleEnabled.toggle()
-        autoCycleMenuItem.state = autoCycleEnabled ? .on : .off
-        autoCycleSliderView.setEnabled(autoCycleEnabled)
-        autoCycleEnabled ? startAutoCycle() : stopAutoCycle()
-    }
-
-    func setAutoCycleInterval(_ index: Int) {
-        autoCycleIntervalIndex = index
-        if autoCycleEnabled { startAutoCycle() }
-    }
-
-    private func startAutoCycle() {
+    private func startAutoCycle(every secs: TimeInterval) {
         autoCycleTimer?.invalidate()
-        let secs = autoCycleIntervals[autoCycleIntervalIndex].seconds
         let timer = Timer(timeInterval: secs, repeats: true) { [weak self] _ in
             self?.nextImage()
         }
@@ -851,9 +826,33 @@ class WallpaperController: NSObject, NSMenuDelegate {
         autoCycleTimer = nil
     }
 
-    @objc func toggleAutoBlurOnLock() {
-        autoBlurOnLockEnabled.toggle()
-        autoBlurOnLockMenuItem.state = autoBlurOnLockEnabled ? .on : .off
+    // MARK: Settings
+
+    // @Published emits on willSet, so sinks use the values they're handed
+    // rather than reading `settings` back. Each sink also fires once on
+    // subscribe, which applies the saved settings at launch.
+    private func observeSettings() {
+        settings.$autoCycle
+            .combineLatest(settings.$autoCycleInterval)
+            .sink { [weak self] enabled, secs in
+                enabled ? self?.startAutoCycle(every: secs) : self?.stopAutoCycle()
+            }
+            .store(in: &cancellables)
+    }
+
+    @objc func openSettings() {
+        if settingsWindow == nil {
+            let win = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(settings: settings)))
+            win.title = "wp Settings"
+            win.styleMask = [.titled, .closable]
+            win.isReleasedWhenClosed = false
+            win.center()
+            settingsWindow = win
+        }
+        // A menu-bar-only app isn't active, so bring it forward first or the
+        // window opens behind whatever app is in front.
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
     // MARK: Lock screen monitor
@@ -877,7 +876,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
     }
 
     @objc private func engageAutoBlur() {
-        guard autoBlurOnLockEnabled, !blurEnabled else { return }
+        guard settings.autoBlurOnLock, !blurEnabled else { return }
         toggleBlur()
     }
 
