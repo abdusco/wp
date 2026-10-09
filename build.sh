@@ -8,7 +8,11 @@ ARCH="${ARCH:-arm64}"
 VERSION="${VERSION:-dev}"
 VERSION_CLEAN=${VERSION#v}
 
-APP="build/${ARCH}/wp.app"
+OUT="build/${ARCH}/wp.app"
+# Assembled in a staging dir and moved into place at the end. If Finder
+# looks at a half-built bundle (no Info.plist yet), LaunchServices caches it
+# as unlaunchable and shows a blocked icon.
+APP="build/.staging-${ARCH}/wp.app"
 
 echo "Building for arch: $ARCH, version: $VERSION_CLEAN"
 
@@ -56,4 +60,9 @@ EOF
 # Ad-hoc sign the whole bundle so the Info.plist is sealed into the signature.
 codesign --force --sign - "$APP"
 
-echo "Built $APP with version $VERSION_CLEAN"
+rm -rf "$OUT"
+mkdir -p "$(dirname "$OUT")"
+mv "$APP" "$OUT"
+rmdir "$(dirname "$APP")"
+
+echo "Built $OUT with version $VERSION_CLEAN"
