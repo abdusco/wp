@@ -215,6 +215,10 @@ final class HTTPStatus: ObservableObject {
     @Published var state: HTTPServer.State = .stopped
 }
 
+// MARK: - Single instance
+
+let activateNotification = Notification.Name("dev.abdus.apps.wp.activate")
+
 // MARK: - Cycle target
 
 enum CycleTarget { case all, currentDisplay }
@@ -684,6 +688,10 @@ class WallpaperController: NSObject, NSMenuDelegate {
         if let envPort { startHTTPServer(port: envPort) }
         setupLockScreenMonitor()
         observeSettings()
+        // Posted by a second launch that found this instance already running.
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(openSettings), name: activateNotification, object: nil,
+            suspensionBehavior: .deliverImmediately)
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(screensChanged),
@@ -1281,6 +1289,22 @@ if args == ["--version"] || args == ["-v"] {
 
 if args == ["--help"] || args == ["-h"] {
     print(usage)
+    exit(0)
+}
+
+// One instance at a time, whether started as wp.app or the bare binary. An
+// flock is released by the OS when the process dies, so a crash never leaves
+// a stale lock. A second launch activates the running one (shows its
+// Settings window) and exits; paths passed to it are not applied.
+let lockPath = FileManager.default.temporaryDirectory.appendingPathComponent("dev.abdus.apps.wp.lock").path
+let lockFD = open(lockPath, O_CREAT | O_RDWR, 0o600)
+if lockFD >= 0 && flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
+    DistributedNotificationCenter.default().postNotificationName(
+        activateNotification, object: nil, userInfo: nil, deliverImmediately: true)
+    guard args.isEmpty else {
+        fputs("wp: already running; quit it first to start with other paths\n", stderr)
+        exit(1)
+    }
     exit(0)
 }
 

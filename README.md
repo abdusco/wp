@@ -34,6 +34,8 @@ Or build from source:
 
 Open `wp.app`. On first launch the settings window opens; add image folders under **Sources**.
 
+Only one instance runs at a time. Launching it again brings up the running instance's settings window.
+
 It can also be started from the terminal with explicit paths, which override the saved sources for that run:
 
 ```sh
