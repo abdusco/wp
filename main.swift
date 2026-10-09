@@ -569,11 +569,13 @@ struct GeneralSettingsView: View {
 }
 
 // The standard macOS editable list: a bordered list with a + / − button bar
-// along its bottom edge. − (or Delete) removes the selected rows.
+// along its bottom edge. − (or Delete) removes the selected rows. Folders
+// can also be dropped onto the list from Finder.
 struct SourcesSettingsView: View {
     @ObservedObject var settings: Settings
     let overridden: Bool
     @State private var selection: Set<String> = []
+    @State private var isDropTarget = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -601,7 +603,7 @@ struct SourcesSettingsView: View {
                 .onDeleteCommand(perform: removeSelected)
                 .overlay {
                     if settings.sources.isEmpty {
-                        Text("No folders yet").foregroundStyle(.secondary)
+                        Text("Drop folders here or click +").foregroundStyle(.secondary)
                     }
                 }
 
@@ -625,7 +627,12 @@ struct SourcesSettingsView: View {
             }
             .background(Color(nsColor: .controlBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(nsColor: .separatorColor)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(isDropTarget ? Color.accentColor : Color(nsColor: .separatorColor),
+                                  lineWidth: isDropTarget ? 2 : 1)
+            )
+            .onDrop(of: [.fileURL], isTargeted: $isDropTarget, perform: addDropped)
 
             if overridden {
                 Text("Paths passed on the command line are in use. Changes here apply on the next launch without arguments.")
@@ -659,8 +666,25 @@ struct SourcesSettingsView: View {
         panel.allowsMultipleSelection = true
         panel.prompt = "Add"
         guard panel.runModal() == .OK else { return }
+        add(panel.urls)
+    }
+
+    // Drops can carry files too; only folders become sources. Each provider
+    // loads its URL asynchronously, so results are added as they arrive.
+    private func addDropped(_ providers: [NSItemProvider]) -> Bool {
+        for provider in providers {
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url, (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+                else { return }
+                DispatchQueue.main.async { add([url]) }
+            }
+        }
+        return true
+    }
+
+    private func add(_ urls: [URL]) {
         let known = Set(settings.sources.map(\.path))
-        settings.sources += panel.urls.map(\.path).filter { !known.contains($0) }.map { Source(path: $0) }
+        settings.sources += urls.map(\.path).filter { !known.contains($0) }.map { Source(path: $0) }
     }
 }
 
