@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import Combine
 import Foundation
 import CoreGraphics
@@ -232,6 +233,115 @@ let autoCycleIntervals: [(label: String, seconds: TimeInterval)] = [
     ("6h", 21600), ("12h", 43200), ("24h", 86400)
 ]
 
+// MARK: - Hotkeys
+
+enum HotkeyAction: String, CaseIterable, Codable {
+    case next, prev, nextCurrentDisplay, prevCurrentDisplay, toggleBlur, toggleShuffle
+
+    var title: String {
+        switch self {
+        case .next:               return "Next image"
+        case .prev:               return "Previous image"
+        case .nextCurrentDisplay: return "Next image on display under cursor"
+        case .prevCurrentDisplay: return "Previous image on display under cursor"
+        case .toggleBlur:         return "Toggle blur"
+        case .toggleShuffle:      return "Toggle shuffle"
+        }
+    }
+
+    // Carbon hotkey ids must be non-zero.
+    var carbonID: UInt32 { UInt32(Self.allCases.firstIndex(of: self)!) + 1 }
+}
+
+// A key combination. The key's name is captured when it's recorded, since
+// turning a key code back into a character depends on the keyboard layout.
+struct Hotkey: Codable, Equatable {
+    var keyCode: UInt32
+    var modifiers: UInt32   // Carbon flags: controlKey, optionKey, shiftKey, cmdKey
+    var key: String
+
+    var display: String {
+        let symbols: [(Int, String)] = [(controlKey, "⌃"), (optionKey, "⌥"), (shiftKey, "⇧"), (cmdKey, "⌘")]
+        return symbols.filter { modifiers & UInt32($0.0) != 0 }.map(\.1).joined() + key
+    }
+}
+
+// In order, F1 to F20.
+let functionKeyCodes = [
+    kVK_F1, kVK_F2, kVK_F3, kVK_F4, kVK_F5, kVK_F6, kVK_F7, kVK_F8, kVK_F9, kVK_F10,
+    kVK_F11, kVK_F12, kVK_F13, kVK_F14, kVK_F15, kVK_F16, kVK_F17, kVK_F18, kVK_F19, kVK_F20,
+]
+
+// Keys whose typed character is blank or unreadable get a fixed name.
+let specialKeyNames: [Int: String] = {
+    var names: [Int: String] = [
+        kVK_LeftArrow: "←", kVK_RightArrow: "→", kVK_UpArrow: "↑", kVK_DownArrow: "↓",
+        kVK_Space: "Space", kVK_Return: "↩", kVK_Tab: "⇥", kVK_Delete: "⌫",
+        kVK_ForwardDelete: "⌦", kVK_Home: "↖", kVK_End: "↘", kVK_PageUp: "⇞", kVK_PageDown: "⇟",
+    ]
+    for (i, code) in functionKeyCodes.enumerated() { names[code] = "F\(i + 1)" }
+    return names
+}()
+
+// Registers system-wide hotkeys through Carbon, which unlike an NSEvent
+// global monitor needs no Accessibility permission and swallows the key
+// press so the frontmost app doesn't also get it.
+final class HotkeyCenter {
+    var onPress: (HotkeyAction) -> Void = { _ in }
+    private var refs: [EventHotKeyRef] = []
+    private static let signature: OSType = 0x7770_484B // 'wpHK'
+
+    init() {
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        // A C callback can't capture, so the center is passed through
+        // userData. The controller keeps it alive for the app's lifetime.
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, userData in
+            guard let event, let userData else { return OSStatus(eventNotHandledErr) }
+            var id = EventHotKeyID()
+            let err = GetEventParameter(event, EventParamName(kEventParamDirectObject),
+                                        EventParamType(typeEventHotKeyID), nil,
+                                        MemoryLayout<EventHotKeyID>.size, nil, &id)
+            guard err == noErr else { return err }
+            let center = Unmanaged<HotkeyCenter>.fromOpaque(userData).takeUnretainedValue()
+            if let action = HotkeyAction.allCases.first(where: { $0.carbonID == id.id }) {
+                center.onPress(action)
+            }
+            return noErr
+        }, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), nil)
+    }
+
+    // Replaces all registrations. Returns the actions that couldn't be
+    // registered: the combination is taken by another app, or by another
+    // action here. Registering in list order means a duplicate is always
+    // flagged on the later action.
+    func register(_ hotkeys: [HotkeyAction: Hotkey]) -> Set<HotkeyAction> {
+        unregisterAll()
+        var failed: Set<HotkeyAction> = []
+        for action in HotkeyAction.allCases {
+            guard let hotkey = hotkeys[action] else { continue }
+            var ref: EventHotKeyRef?
+            let id = EventHotKeyID(signature: Self.signature, id: action.carbonID)
+            let status = RegisterEventHotKey(hotkey.keyCode, hotkey.modifiers, id,
+                                             GetApplicationEventTarget(), 0, &ref)
+            if status == noErr, let ref { refs.append(ref) } else { failed.insert(action) }
+        }
+        return failed
+    }
+
+    func unregisterAll() {
+        refs.forEach { UnregisterEventHotKey($0) }
+        refs = []
+    }
+}
+
+// Runtime hotkey state for the settings window. While a shortcut is being
+// recorded, all hotkeys are unregistered so pressing an existing combination
+// reaches the recorder instead of firing.
+final class HotkeyState: ObservableObject {
+    @Published var failed: Set<HotkeyAction> = []
+    @Published var recording: HotkeyAction?
+}
+
 // MARK: - Settings
 
 // A folder images are read from. Disabled folders stay in the list so they
@@ -267,6 +377,14 @@ final class Settings: ObservableObject {
     @Published var httpPort: Int {
         didSet { defaults.set(httpPort, forKey: "httpPort") }
     }
+    // Stored keyed by the action's raw value: JSONEncoder writes a
+    // dictionary with enum keys as a flat array rather than an object.
+    @Published var hotkeys: [HotkeyAction: Hotkey] {
+        didSet {
+            let byName = Dictionary(uniqueKeysWithValues: hotkeys.map { ($0.key.rawValue, $0.value) })
+            defaults.set(try? JSONEncoder().encode(byName), forKey: "hotkeys")
+        }
+    }
 
     init() {
         defaults.register(defaults: [
@@ -283,6 +401,11 @@ final class Settings: ObservableObject {
         autoCycleInterval = defaults.double(forKey: "autoCycleInterval")
         httpEnabled = defaults.bool(forKey: "httpEnabled")
         httpPort = defaults.integer(forKey: "httpPort")
+        let byName = defaults.data(forKey: "hotkeys")
+            .flatMap { try? JSONDecoder().decode([String: Hotkey].self, from: $0) } ?? [:]
+        hotkeys = Dictionary(uniqueKeysWithValues: byName.compactMap { name, hotkey in
+            HotkeyAction(rawValue: name).map { ($0, hotkey) }
+        })
     }
 }
 
@@ -317,6 +440,7 @@ final class LoginItem: ObservableObject {
 struct SettingsView: View {
     @ObservedObject var settings: Settings
     @ObservedObject var httpStatus: HTTPStatus
+    @ObservedObject var hotkeyState: HotkeyState
     let sourcesOverridden: Bool
     let httpPortOverride: UInt16?
 
@@ -326,6 +450,8 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
             SourcesSettingsView(settings: settings, overridden: sourcesOverridden)
                 .tabItem { Label("Sources", systemImage: "folder") }
+            HotkeysSettingsView(settings: settings, state: hotkeyState)
+                .tabItem { Label("Hotkeys", systemImage: "keyboard") }
         }
         .frame(width: 480, height: 600)
     }
@@ -498,6 +624,108 @@ struct SourcesSettingsView: View {
     }
 }
 
+struct HotkeysSettingsView: View {
+    @ObservedObject var settings: Settings
+    @ObservedObject var state: HotkeyState
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach(HotkeyAction.allCases, id: \.self) { action in
+                    LabeledContent(action.title) {
+                        HStack(spacing: 6) {
+                            if state.failed.contains(action) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.yellow)
+                                    .help("Couldn't register. Another app or another action here already uses this shortcut.")
+                            }
+                            ShortcutRecorder(action: action, hotkey: binding(for: action), state: state)
+                        }
+                    }
+                }
+            } footer: {
+                Text("Click a shortcut to record a new one. Esc cancels, Delete clears. Shortcuts need ⌘, ⌥ or ⌃ unless they use a function key.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func binding(for action: HotkeyAction) -> Binding<Hotkey?> {
+        Binding(get: { settings.hotkeys[action] },
+                set: { settings.hotkeys[action] = $0 })
+    }
+}
+
+// A button that, when clicked, captures the next key combination typed into
+// the settings window. Only one recorder is active at a time: starting
+// another one (state.recording changes) stops this one.
+struct ShortcutRecorder: View {
+    let action: HotkeyAction
+    @Binding var hotkey: Hotkey?
+    @ObservedObject var state: HotkeyState
+    @State private var monitor: Any?
+
+    private var isRecording: Bool { state.recording == action }
+
+    var body: some View {
+        Button(action: { isRecording ? stop() : start() }) {
+            Text(isRecording ? "Type shortcut…" : hotkey?.display ?? "Record Shortcut")
+                .foregroundStyle(hotkey == nil || isRecording ? .secondary : .primary)
+                .frame(minWidth: 110)
+        }
+        .onReceive(state.$recording) { recording in
+            if recording != action { removeMonitor() }
+        }
+        .onDisappear(perform: stop)
+    }
+
+    private func start() {
+        state.recording = action
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            handle(event)
+            return nil
+        }
+    }
+
+    private func handle(_ event: NSEvent) {
+        let code = Int(event.keyCode)
+        let flags = event.modifierFlags.intersection([.control, .option, .shift, .command])
+
+        if code == kVK_Escape { stop(); return }
+        if flags.isEmpty && (code == kVK_Delete || code == kVK_ForwardDelete) {
+            hotkey = nil
+            stop()
+            return
+        }
+        // A bare letter or Shift+letter would hijack normal typing everywhere.
+        guard functionKeyCodes.contains(code) || !flags.isDisjoint(with: [.control, .option, .command]) else {
+            NSSound.beep()
+            return
+        }
+
+        var modifiers: UInt32 = 0
+        if flags.contains(.control) { modifiers |= UInt32(controlKey) }
+        if flags.contains(.option)  { modifiers |= UInt32(optionKey) }
+        if flags.contains(.shift)   { modifiers |= UInt32(shiftKey) }
+        if flags.contains(.command) { modifiers |= UInt32(cmdKey) }
+        // Without modifiers applied, ⌥A reads as "A" rather than "å".
+        let key = specialKeyNames[code] ?? (event.characters(byApplyingModifiers: []) ?? "?").uppercased()
+        hotkey = Hotkey(keyCode: UInt32(code), modifiers: modifiers, key: key)
+        stop()
+    }
+
+    private func stop() {
+        removeMonitor()
+        if state.recording == action { state.recording = nil }
+    }
+
+    private func removeMonitor() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
+}
+
 // MARK: - WallpaperRowView
 
 // Two-line, clickable menu row: a small display-name label above a larger
@@ -631,6 +859,8 @@ class WallpaperController: NSObject, NSMenuDelegate {
     var httpServer: HTTPServer?
     var httpGeneration = 0
     let httpStatus = HTTPStatus()
+    let hotkeyCenter = HotkeyCenter()
+    let hotkeyState = HotkeyState()
     var autoCycleTimer: Timer?
     var wallpaperMenuItems: [NSMenuItem] = []
     let settings: Settings
@@ -1124,11 +1354,35 @@ class WallpaperController: NSObject, NSMenuDelegate {
                 }
                 .store(in: &cancellables)
         }
+
+        hotkeyCenter.onPress = { [weak self] action in self?.perform(action) }
+        settings.$hotkeys
+            .combineLatest(hotkeyState.$recording)
+            .sink { [weak self] hotkeys, recording in
+                guard let self else { return }
+                if recording != nil {
+                    self.hotkeyCenter.unregisterAll()
+                } else {
+                    self.hotkeyState.failed = self.hotkeyCenter.register(hotkeys)
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    private func perform(_ action: HotkeyAction) {
+        switch action {
+        case .next:               cycleImage(delta:  1, display: nil)
+        case .prev:               cycleImage(delta: -1, display: nil)
+        case .nextCurrentDisplay: cycleImage(delta:  1, display: displayUnderCursor())
+        case .prevCurrentDisplay: cycleImage(delta: -1, display: displayUnderCursor())
+        case .toggleBlur:         toggleBlur()
+        case .toggleShuffle:      toggleShuffle()
+        }
     }
 
     @objc func openSettings() {
         if settingsWindow == nil {
-            let view = SettingsView(settings: settings, httpStatus: httpStatus,
+            let view = SettingsView(settings: settings, httpStatus: httpStatus, hotkeyState: hotkeyState,
                                     sourcesOverridden: sourcesOverridden, httpPortOverride: envPort)
             let hosting = NSHostingController(rootView: view)
             let win = NSWindow(contentViewController: hosting)
@@ -1141,6 +1395,13 @@ class WallpaperController: NSObject, NSMenuDelegate {
             // to the SwiftUI content first.
             win.setContentSize(hosting.view.fittingSize)
             win.center()
+            // The window is hidden, not destroyed, so the recorder's
+            // onDisappear may not run. A recording left active would keep
+            // every hotkey unregistered.
+            NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: win,
+                                                   queue: .main) { [weak self] _ in
+                self?.hotkeyState.recording = nil
+            }
             settingsWindow = win
         }
         // A menu-bar-only app isn't active, so bring it forward first or the

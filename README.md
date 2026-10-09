@@ -11,6 +11,7 @@ A minimal macOS wallpaper switcher. Displays images across all monitors, sits be
 - Blur mode (GPU-accelerated via Metal + CoreImage)
 - Shuffle mode
 - Status bar menu and settings window
+- Global hotkeys
 - Double-click the desktop to toggle blur
 - HTTP API for remote control
 
@@ -68,6 +69,7 @@ Settings are saved between launches.
 - **General**: start at login, blur when the screen locks or sleeps, auto cycle and its interval, HTTP API on/off and port.
   Start at login registers `wp.app` as a login item, so move it to `/Applications` first; it's unavailable when running the bare binary.
 - **Sources**: add, remove and enable/disable image folders. Changes apply immediately.
+- **Hotkeys**: system-wide shortcuts for next/previous image (all displays or the one under the cursor), blur and shuffle. No Accessibility permission needed. A warning icon means another app, or another action here, already uses that shortcut.
 
 ## HTTP API
 
