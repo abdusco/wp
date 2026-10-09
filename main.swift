@@ -287,11 +287,17 @@ private class DesktopWindow: NSWindow {
 // transient (recreated when a display reconnects), but imageIndex and the
 // shuffled order persist so a display resumes exactly where it left off after
 // a disconnect/reconnect (e.g. closing and reopening the lid).
+//
+// A slide is the set of images shown together on one display. imageIndex
+// indexes into `slides`, which is rebuilt from the active image order.
+typealias Slide = [URL]
+
 final class Display {
     let key: String
     var window: NSWindow?
     var imageIndex = 0
     var shuffled: [URL]
+    var slides: [Slide] = []
 
     init(key: String, shuffled: [URL]) {
         self.key = key
@@ -305,7 +311,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
     var order: [String] = []                 // keys of connected displays, in screen order
     var blurEnabled = false
     var shuffleEnabled = true
-    var blurCache: [URL: NSImage] = [:]
+    var blurCache: [Slide: NSImage] = [:]
     var statusItem: NSStatusItem!
     var blurMenuItem: NSMenuItem!
     var shuffleMenuItem: NSMenuItem!
@@ -324,6 +330,10 @@ class WallpaperController: NSObject, NSMenuDelegate {
 
     func activeImages(for display: Display) -> [URL] {
         shuffleEnabled ? display.shuffled : images
+    }
+
+    func rebuildSlides(for display: Display) {
+        display.slides = activeImages(for: display).map { [$0] }
     }
 
     lazy var ciContext: CIContext = {
@@ -418,6 +428,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
 
             let display = displays[key] ?? {
                 let d = Display(key: key, shuffled: images.shuffled())
+                rebuildSlides(for: d)
                 displays[key] = d
                 return d
             }()
@@ -449,17 +460,17 @@ class WallpaperController: NSObject, NSMenuDelegate {
         return t
     }
 
-    func currentImageURL(for display: Display) -> URL? {
-        let pool = activeImages(for: display)
-        guard !pool.isEmpty else { return nil }
-        return pool[display.imageIndex % pool.count]
+    func currentSlide(for display: Display) -> Slide? {
+        let slides = display.slides
+        guard !slides.isEmpty else { return nil }
+        return slides[display.imageIndex % slides.count]
     }
 
     private func updateImages(_ target: Display? = nil) {
         let targets = target.map { [$0] } ?? connected
         for display in targets {
             guard let win = display.window else { continue }
-            guard let url = currentImageURL(for: display) else { continue }
+            guard let slide = currentSlide(for: display), let url = slide.first else { continue }
 
             if !blurEnabled {
                 let layer = win.contentView?.layer
@@ -468,7 +479,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
                 continue
             }
 
-            if let cached = blurCache[url] {
+            if let cached = blurCache[slide] {
                 let layer = win.contentView?.layer
                 layer?.add(fadeTransition(), forKey: "transition")
                 layer?.contents = cached
@@ -480,7 +491,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
                       let img = NSImage(contentsOf: url),
                       let blurred = self.blurImage(img, sigma: 200) else { return }
                 DispatchQueue.main.async {
-                    self.blurCache[url] = blurred
+                    self.blurCache[slide] = blurred
                     let layer = win?.contentView?.layer
                     layer?.add(self.fadeTransition(), forKey: "transition")
                     layer?.contents = blurred
@@ -573,16 +584,18 @@ class WallpaperController: NSObject, NSMenuDelegate {
         wallpaperMenuItems.removeAll()
 
         for display in connected {
-            guard let url = currentImageURL(for: display) else { continue }
+            guard let slide = currentSlide(for: display) else { continue }
             let displayName = display.window?.screen?.localizedName ?? "Display"
 
-            let row = WallpaperRowView(displayName: displayName, filename: url.lastPathComponent) {
-                NSWorkspace.shared.activateFileViewerSelecting([url])
+            for url in slide {
+                let row = WallpaperRowView(displayName: displayName, filename: url.lastPathComponent) {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
+                let item = NSMenuItem()
+                item.view = row
+                menu.addItem(item)
+                wallpaperMenuItems.append(item)
             }
-            let item = NSMenuItem()
-            item.view = row
-            menu.addItem(item)
-            wallpaperMenuItems.append(item)
         }
     }
 
@@ -594,7 +607,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
     func cycleImage(delta: Int, display target: Display?) {
         let targets = target.map { [$0] } ?? connected
         for display in targets {
-            let count = activeImages(for: display).count
+            let count = display.slides.count
             guard count > 0 else { continue }
             display.imageIndex = (display.imageIndex + delta + count) % count
         }
@@ -617,6 +630,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
         shuffleMenuItem.state = shuffleEnabled ? .on : .off
         for display in displays.values {
             if shuffleEnabled { display.shuffled = images.shuffled() }
+            rebuildSlides(for: display)
             display.imageIndex = 0
         }
         updateImages()
