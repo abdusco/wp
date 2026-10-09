@@ -437,24 +437,34 @@ final class LoginItem: ObservableObject {
     }
 }
 
-struct SettingsView: View {
-    @ObservedObject var settings: Settings
-    @ObservedObject var httpStatus: HTTPStatus
-    @ObservedObject var hotkeyState: HotkeyState
-    let sourcesOverridden: Bool
-    let httpPortOverride: UInt16?
-
-    var body: some View {
-        TabView {
-            GeneralSettingsView(settings: settings, httpStatus: httpStatus, httpPortOverride: httpPortOverride)
-                .tabItem { Label("General", systemImage: "gearshape") }
-            SourcesSettingsView(settings: settings, overridden: sourcesOverridden)
-                .tabItem { Label("Sources", systemImage: "folder") }
-            HotkeysSettingsView(settings: settings, state: hotkeyState)
-                .tabItem { Label("Hotkeys", systemImage: "keyboard") }
-        }
-        .frame(width: 480, height: 600)
+// Toolbar tabs, the standard macOS settings window layout (as in Safari or
+// Mail): icon + label tabs in the toolbar, the window title follows the
+// selected tab, and the window resizes to each tab's height. SwiftUI's
+// TabView only gives this inside a SwiftUI App's Settings scene, so the
+// tabs are an AppKit NSTabViewController hosting one SwiftUI view each.
+func makeSettingsTabs(settings: Settings, httpStatus: HTTPStatus, hotkeyState: HotkeyState,
+                      sourcesOverridden: Bool, httpPortOverride: UInt16?) -> NSTabViewController {
+    func tab(_ label: String, _ symbol: String, height: CGFloat, _ view: some View) -> NSTabViewItem {
+        let hosting = NSHostingController(rootView: view.frame(width: 500, height: height))
+        // Report the SwiftUI size as preferredContentSize, which the tab
+        // controller uses to resize the window on tab switches.
+        hosting.sizingOptions = .preferredContentSize
+        hosting.title = label   // shown as the window title while selected
+        let item = NSTabViewItem(viewController: hosting)
+        item.label = label
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        return item
     }
+
+    let tabs = NSTabViewController()
+    tabs.tabStyle = .toolbar
+    tabs.addTabViewItem(tab("General", "gearshape", height: 545,
+        GeneralSettingsView(settings: settings, httpStatus: httpStatus, httpPortOverride: httpPortOverride)))
+    tabs.addTabViewItem(tab("Sources", "folder", height: 400,
+        SourcesSettingsView(settings: settings, overridden: sourcesOverridden)))
+    tabs.addTabViewItem(tab("Hotkeys", "keyboard", height: 340,
+        HotkeysSettingsView(settings: settings, state: hotkeyState)))
+    return tabs
 }
 
 struct GeneralSettingsView: View {
@@ -1382,18 +1392,19 @@ class WallpaperController: NSObject, NSMenuDelegate {
 
     @objc func openSettings() {
         if settingsWindow == nil {
-            let view = SettingsView(settings: settings, httpStatus: httpStatus, hotkeyState: hotkeyState,
-                                    sourcesOverridden: sourcesOverridden, httpPortOverride: envPort)
-            let hosting = NSHostingController(rootView: view)
-            let win = NSWindow(contentViewController: hosting)
-            win.title = "wp Settings"
+            let tabs = makeSettingsTabs(settings: settings, httpStatus: httpStatus, hotkeyState: hotkeyState,
+                                        sourcesOverridden: sourcesOverridden, httpPortOverride: envPort)
+            let win = NSWindow(contentViewController: tabs)
             win.styleMask = [.titled, .closable]
+            win.toolbarStyle = .preference
             win.isReleasedWhenClosed = false
             // The hosting controller only sizes the window on its first
-            // layout pass, so centering right away places a 1×32 window that
+            // layout pass, so centering right away places a tiny window that
             // then grows past the top of the screen and jumps back. Size it
-            // to the SwiftUI content first.
-            win.setContentSize(hosting.view.fittingSize)
+            // to the first tab's SwiftUI content first.
+            if let first = tabs.tabViewItems.first?.viewController {
+                win.setContentSize(first.view.fittingSize)
+            }
             win.center()
             // The window is hidden, not destroyed, so the recorder's
             // onDisappear may not run. A recording left active would keep
@@ -1408,6 +1419,12 @@ class WallpaperController: NSObject, NSMenuDelegate {
         // window opens behind whatever app is in front.
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
+        // SwiftUI focuses the first control (the Blur switch) once the window
+        // is key, which draws a focus ring before anything was pressed.
+        // Clearing it after that pass leaves focus to Tab, like other apps.
+        DispatchQueue.main.async { [weak self] in
+            self?.settingsWindow?.makeFirstResponder(nil)
+        }
     }
 
     // MARK: Lock screen monitor
