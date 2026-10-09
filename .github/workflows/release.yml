@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
     strategy:
       matrix:
         arch: [x86_64, arm64]
@@ -23,8 +23,8 @@ jobs:
       - name: Build Swift application
         run: |
           chmod +x build.sh
-          commit=$(git rev-parse --short HEAD)
-          export VERSION="${{ github.ref_name }}-$commit"
+          # Plain tag version: CFBundleShortVersionString must be numeric.
+          export VERSION="${{ github.ref_name }}"
           export ARCH="${{ matrix.arch }}"
           ./build.sh
 
@@ -79,6 +79,6 @@ jobs:
         with:
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
-          draft: true
+          draft: false
           body: ${{ steps.changelog.outputs.changelog }}
           files: binaries/*

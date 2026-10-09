@@ -107,7 +107,7 @@ Supported architectures: `arm64`, `x86_64`.
 
 ## Release
 
-Push a `v*` tag to trigger the GitHub Actions release workflow, which builds both architectures and creates a draft release:
+Push a `v*` tag to trigger the GitHub Actions release workflow, which builds `wp.app` for both architectures and publishes a release with `wp-arm64.zip` and `wp-x86_64.zip`:
 
 ```sh
 git tag v1.0.0
