@@ -1130,10 +1130,16 @@ class WallpaperController: NSObject, NSMenuDelegate {
         if settingsWindow == nil {
             let view = SettingsView(settings: settings, httpStatus: httpStatus,
                                     sourcesOverridden: sourcesOverridden, httpPortOverride: envPort)
-            let win = NSWindow(contentViewController: NSHostingController(rootView: view))
+            let hosting = NSHostingController(rootView: view)
+            let win = NSWindow(contentViewController: hosting)
             win.title = "wp Settings"
             win.styleMask = [.titled, .closable]
             win.isReleasedWhenClosed = false
+            // The hosting controller only sizes the window on its first
+            // layout pass, so centering right away places a 1×32 window that
+            // then grows past the top of the screen and jumps back. Size it
+            // to the SwiftUI content first.
+            win.setContentSize(hosting.view.fittingSize)
             win.center()
             settingsWindow = win
         }
