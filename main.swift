@@ -48,6 +48,42 @@ func imageAspect(_ url: URL) -> CGFloat? {
     return (5...8).contains(orientation) ? CGFloat(h / w) : CGFloat(w / h)
 }
 
+// Groups portrait images into side-by-side slides for a screen of the given
+// aspect; wide images stay alone. Portraits are chunked in order and each
+// group sits where its first member was, so the overall order is kept.
+//
+// Each chunk takes 1–3 portraits, whichever combined aspect is closest to
+// the screen's (log ratio, so too wide and too narrow weigh the same).
+// A chunk of 2 or 3 that would strand a single last portrait is skipped,
+// e.g. 4 left becomes 2+2 rather than 3+1.
+func buildSlides(_ urls: [URL], aspects: [URL: CGFloat], screenAspect: CGFloat) -> [Slide] {
+    let portraits = urls.filter { (aspects[$0] ?? 1) < 1 }
+    var groupAt: [URL: Slide] = [:]
+    var i = 0
+    while i < portraits.count {
+        let remaining = portraits.count - i
+        let fit = { (n: Int) -> CGFloat in
+            let sum = portraits[i..<i + n].reduce(0) { $0 + aspects[$1]! }
+            return abs(log(sum / screenAspect))
+        }
+        let n = (1...min(3, remaining))
+            .filter { $0 == 1 || remaining - $0 != 1 }
+            .min { fit($0) < fit($1) }!
+        groupAt[portraits[i]] = Array(portraits[i..<i + n])
+        i += n
+    }
+
+    var slides: [Slide] = []
+    for url in urls {
+        if let group = groupAt[url] {
+            slides.append(group)
+        } else if (aspects[url] ?? 1) >= 1 {
+            slides.append([url])
+        }
+    }
+    return slides
+}
+
 // Truncates a filename to at most `maxLength` characters, eliding the middle
 // of the base name so both the start and the extension stay visible.
 func truncateFilename(_ name: String, maxLength: Int = 80) -> String {
@@ -314,6 +350,7 @@ final class Display {
     var imageIndex = 0
     var shuffled: [URL]
     var slides: [Slide] = []
+    var aspect: CGFloat?        // screen aspect the slides were grouped for
 
     init(key: String, shuffled: [URL]) {
         self.key = key
@@ -349,8 +386,15 @@ class WallpaperController: NSObject, NSMenuDelegate {
         shuffleEnabled ? display.shuffled : images
     }
 
+    // Keeps the display on the image it was showing, since regrouping moves
+    // slide boundaries and the old index would point somewhere else.
     func rebuildSlides(for display: Display) {
-        display.slides = activeImages(for: display).map { [$0] }
+        let showing = currentSlide(for: display)?.first
+        display.slides = buildSlides(activeImages(for: display), aspects: aspects,
+                                     screenAspect: display.aspect ?? 16.0 / 9.0)
+        display.imageIndex = showing.flatMap { url in
+            display.slides.firstIndex { $0.contains(url) }
+        } ?? 0
     }
 
     lazy var ciContext: CIContext = {
@@ -449,10 +493,17 @@ class WallpaperController: NSObject, NSMenuDelegate {
 
             let display = displays[key] ?? {
                 let d = Display(key: key, shuffled: images.shuffled())
-                rebuildSlides(for: d)
                 displays[key] = d
                 return d
             }()
+
+            // Portrait grouping depends on the screen's shape, so a new
+            // display or a resolution change regroups.
+            let aspect = screen.frame.width / screen.frame.height
+            if display.aspect != aspect {
+                display.aspect = aspect
+                rebuildSlides(for: display)
+            }
 
             if let win = display.window {
                 win.setFrame(screen.frame, display: false)
