@@ -32,6 +32,10 @@ Or build from source:
 
 ## Usage
 
+Open `wp.app`. On first launch the settings window opens; add image folders under **Sources**.
+
+It can also be started from the terminal with explicit paths, which override the saved sources for that run:
+
 ```sh
 alias wp=/Applications/wp.app/Contents/MacOS/wp
 wp ~/Pictures/wallpapers/
@@ -60,6 +64,7 @@ wp --version
 Settings are saved between launches.
 
 - **General**: blur when the screen locks or sleeps, auto cycle and its interval.
+- **Sources**: add, remove and enable/disable image folders. Changes apply immediately.
 
 ## HTTP API
 

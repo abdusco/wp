@@ -188,10 +188,23 @@ let autoCycleIntervals: [(label: String, seconds: TimeInterval)] = [
 
 // MARK: - Settings
 
+// A folder images are read from. Disabled folders stay in the list so they
+// can be switched back on without picking them again.
+struct Source: Codable, Identifiable, Equatable {
+    var path: String
+    var enabled = true
+    var id: String { path }
+}
+
 // User preferences, persisted in UserDefaults. The settings window edits
 // these directly; the controller subscribes to the ones it acts on.
 final class Settings: ObservableObject {
     private let defaults = UserDefaults.standard
+
+    @Published var sources: [Source] {
+        didSet { defaults.set(try? JSONEncoder().encode(sources), forKey: "sources") }
+    }
+    var enabledSourcePaths: [String] { sources.filter(\.enabled).map(\.path) }
 
     @Published var autoBlurOnLock: Bool {
         didSet { defaults.set(autoBlurOnLock, forKey: "autoBlurOnLock") }
@@ -209,6 +222,8 @@ final class Settings: ObservableObject {
             "autoCycle": false,
             "autoCycleInterval": 300.0,
         ])
+        sources = defaults.data(forKey: "sources")
+            .flatMap { try? JSONDecoder().decode([Source].self, from: $0) } ?? []
         autoBlurOnLock = defaults.bool(forKey: "autoBlurOnLock")
         autoCycle = defaults.bool(forKey: "autoCycle")
         autoCycleInterval = defaults.double(forKey: "autoCycleInterval")
@@ -217,11 +232,14 @@ final class Settings: ObservableObject {
 
 struct SettingsView: View {
     @ObservedObject var settings: Settings
+    let sourcesOverridden: Bool
 
     var body: some View {
         TabView {
             GeneralSettingsView(settings: settings)
                 .tabItem { Label("General", systemImage: "gearshape") }
+            SourcesSettingsView(settings: settings, overridden: sourcesOverridden)
+                .tabItem { Label("Sources", systemImage: "folder") }
         }
         .frame(width: 480, height: 400)
     }
@@ -246,6 +264,72 @@ struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+struct SourcesSettingsView: View {
+    @ObservedObject var settings: Settings
+    let overridden: Bool
+
+    var body: some View {
+        Form {
+            Section {
+                if settings.sources.isEmpty {
+                    Text("No folders yet.").foregroundStyle(.secondary)
+                }
+                // Rows look sources up by id rather than binding by index,
+                // since removing a row while SwiftUI still holds an index
+                // binding to it can crash.
+                ForEach(settings.sources) { source in
+                    HStack {
+                        Toggle(isOn: enabledBinding(for: source.id)) {
+                            Text(URL(fileURLWithPath: source.path).lastPathComponent)
+                            Text((source.path as NSString).abbreviatingWithTildeInPath)
+                        }
+                        Button {
+                            settings.sources.removeAll { $0.id == source.id }
+                        } label: {
+                            Image(systemName: "minus.circle")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Remove")
+                    }
+                }
+            } header: {
+                Text("Folders")
+            } footer: {
+                if overridden {
+                    Text("Paths passed on the command line are in use. Changes here apply on the next launch without arguments.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Section {
+                Button("Add Folder…", action: addFolders)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func enabledBinding(for id: String) -> Binding<Bool> {
+        Binding(
+            get: { settings.sources.first { $0.id == id }?.enabled ?? false },
+            set: { value in
+                if let i = settings.sources.firstIndex(where: { $0.id == id }) {
+                    settings.sources[i].enabled = value
+                }
+            }
+        )
+    }
+
+    private func addFolders() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Add"
+        guard panel.runModal() == .OK else { return }
+        let known = Set(settings.sources.map(\.path))
+        settings.sources += panel.urls.map(\.path).filter { !known.contains($0) }.map { Source(path: $0) }
     }
 }
 
@@ -382,7 +466,8 @@ class WallpaperController: NSObject, NSMenuDelegate {
     var httpServer: HTTPServer?
     var autoCycleTimer: Timer?
     var wallpaperMenuItems: [NSMenuItem] = []
-    let settings = Settings()
+    let settings: Settings
+    let sourcesOverridden: Bool              // command-line paths win over saved sources
     var settingsWindow: NSWindow?
     var cancellables: Set<AnyCancellable> = []
 
@@ -424,9 +509,11 @@ class WallpaperController: NSObject, NSMenuDelegate {
         return CIContext(options: [.useSoftwareRenderer: false])
     }()
 
-    init(images: [URL]) {
+    init(images: [URL], settings: Settings, sourcesOverridden: Bool) {
         self.images = images
         self.aspects = readAspects(images)
+        self.settings = settings
+        self.sourcesOverridden = sourcesOverridden
         super.init()
         syncScreens()
         setupMenu()
@@ -838,11 +925,24 @@ class WallpaperController: NSObject, NSMenuDelegate {
                 enabled ? self?.startAutoCycle(every: secs) : self?.stopAutoCycle()
             }
             .store(in: &cancellables)
+
+        // Images were loaded from the saved sources at launch, so only later
+        // changes rescan. Runs on the main thread, so a very large folder
+        // stalls the UI briefly while headers are read.
+        if !sourcesOverridden {
+            settings.$sources
+                .map { $0.filter(\.enabled).map(\.path) }
+                .removeDuplicates()
+                .dropFirst()
+                .sink { [weak self] paths in self?.setImages(collectImages(from: paths)) }
+                .store(in: &cancellables)
+        }
     }
 
     @objc func openSettings() {
         if settingsWindow == nil {
-            let win = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(settings: settings)))
+            let view = SettingsView(settings: settings, sourcesOverridden: sourcesOverridden)
+            let win = NSWindow(contentViewController: NSHostingController(rootView: view))
             win.title = "wp Settings"
             win.styleMask = [.titled, .closable]
             win.isReleasedWhenClosed = false
@@ -943,10 +1043,14 @@ class WallpaperController: NSObject, NSMenuDelegate {
 
 var version = "dev"
 
-let args = Array(CommandLine.arguments.dropFirst())
+// Older macOS versions pass a -psn_ process serial number when launching
+// from Finder; it isn't a path.
+let args = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-psn_") }
 
 let usage = """
-Usage: wp <image|dir> [...]
+Usage: wp [image|dir ...]
+
+With no arguments, images come from the folders set in Settings → Sources.
 
   --version, -v   Print version and exit
   --help, -h      Show this help and exit
@@ -968,13 +1072,12 @@ if args == ["--help"] || args == ["-h"] {
     exit(0)
 }
 
-guard !args.isEmpty else {
-    fputs(usage + "\n", stderr)
-    exit(1)
-}
+let settings = Settings()
+let images = collectImages(from: args.isEmpty ? settings.enabledSourcePaths : args)
 
-let images = collectImages(from: args)
-guard !images.isEmpty else {
+// Explicit paths that match nothing are a mistake worth failing on; with no
+// arguments the app starts anyway so sources can be set up in Settings.
+if !args.isEmpty && images.isEmpty {
     fputs("wp: no images found\n", stderr)
     exit(1)
 }
@@ -982,6 +1085,7 @@ guard !images.isEmpty else {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
-let controller = WallpaperController(images: images)
+let controller = WallpaperController(images: images, settings: settings, sourcesOverridden: !args.isEmpty)
+if images.isEmpty { controller.openSettings() }
 
 app.run()
