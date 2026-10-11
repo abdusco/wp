@@ -466,7 +466,7 @@ func makeSettingsTabs(settings: Settings, httpStatus: HTTPStatus, hotkeyState: H
 
     let tabs = NSTabViewController()
     tabs.tabStyle = .toolbar
-    tabs.addTabViewItem(tab("General", "gearshape", height: 585,
+    tabs.addTabViewItem(tab("General", "gearshape", height: 555,
         GeneralSettingsView(settings: settings, httpStatus: httpStatus, httpPortOverride: httpPortOverride)))
     tabs.addTabViewItem(tab("Sources", "folder", height: 400,
         SourcesSettingsView(settings: settings, overridden: sourcesOverridden)))
@@ -514,7 +514,6 @@ struct GeneralSettingsView: View {
                 Toggle("Blur when the screen locks or sleeps", isOn: $settings.autoBlurOnLock)
             }
             Section("Auto Cycle") {
-                Toggle("Cycle images automatically", isOn: $settings.autoCycle)
                 LabeledContent("Interval") {
                     HStack {
                         Slider(value: intervalIndex, in: 0...Double(autoCycleIntervals.count - 1), step: 1)
@@ -523,7 +522,6 @@ struct GeneralSettingsView: View {
                             .frame(width: 32, alignment: .trailing)
                     }
                 }
-                .disabled(!settings.autoCycle)
             }
             Section {
                 Toggle("Enable HTTP API", isOn: $settings.httpEnabled)
@@ -937,6 +935,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var blurMenuItem: NSMenuItem!
     var shuffleMenuItem: NSMenuItem!
+    var autoCycleMenuItem: NSMenuItem!
     var globalMonitor: Any?
     var httpServer: HTTPServer?
     var httpGeneration = 0
@@ -1373,6 +1372,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
         blurMenuItem = item("Blur", "drop", #selector(toggleBlur), "")
         shuffleMenuItem = item("Shuffle", "shuffle", #selector(toggleShuffle), "")
         shuffleMenuItem.state = .on
+        autoCycleMenuItem = item("Auto Cycle", "timer", #selector(toggleAutoCycle), "")
 
         menu.addItem(.separator())
 
@@ -1434,6 +1434,10 @@ class WallpaperController: NSObject, NSMenuDelegate {
         updateImages()
     }
 
+    @objc func toggleAutoCycle() {
+        settings.autoCycle.toggle()
+    }
+
     @objc func toggleShuffle() {
         shuffleEnabled.toggle()
         shuffleMenuItem.state = shuffleEnabled ? .on : .off
@@ -1485,6 +1489,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
         settings.$autoCycle
             .combineLatest(settings.$autoCycleInterval)
             .sink { [weak self] enabled, secs in
+                self?.autoCycleMenuItem.state = enabled ? .on : .off
                 enabled ? self?.startAutoCycle(every: secs) : self?.stopAutoCycle()
             }
             .store(in: &cancellables)
@@ -1645,7 +1650,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
                                     self.cycleImage(delta: -1, display: display)
                                 },
                                 onBlur: { [weak self] in self?.toggleBlur() },
-                                onAutoCycle: { [weak self] in self?.settings.autoCycle.toggle() })
+                                onAutoCycle: { [weak self] in self?.toggleAutoCycle() })
         // Only the current server may update the status, not one that's
         // being replaced.
         server.onStateChange = { [weak self, weak server] state in

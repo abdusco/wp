@@ -59,6 +59,7 @@ wp --version
 | Status bar → Previous Image | Go back one image |
 | Status bar → Blur | Toggle blur |
 | Status bar → Shuffle | Toggle shuffle (reshuffles on enable) |
+| Status bar → Auto Cycle | Toggle automatic image cycling |
 | Double-click desktop | Toggle blur |
 | Status bar → Settings… (`⌘,`) | Open the settings window |
 | Global hotkeys | Set your own in Settings → Hotkeys |
@@ -67,7 +68,7 @@ wp --version
 
 Settings are saved between launches.
 
-- **General**: start at login, blur amount and blur when the screen locks or sleeps, auto cycle and its interval, HTTP API on/off and port.
+- **General**: start at login, blur amount and blur when the screen locks or sleeps, auto-cycle interval, HTTP API on/off and port. Toggle Auto Cycle from the status bar menu.
   Start at login registers `wp.app` as a login item, so move it to `/Applications` first; it's unavailable when running the bare binary.
   Manual next/previous actions, shuffle changes, and source changes restart the auto-cycle interval when automatic cycling is enabled.
 - **Sources**: add (with + or by dropping folders from Finder), remove and enable/disable image folders. Changes apply immediately.
