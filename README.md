@@ -87,6 +87,7 @@ PORT=9876 wp ~/Pictures/wallpapers/
 | `GET /next` | Next image |
 | `GET /prev` | Previous image |
 | `GET /blur` | Toggle blur |
+| `GET /auto-cycle` | Toggle automatic image cycling at the configured interval |
 
 Add `?current_display=true` to `/next` or `/prev` to change only the display under the cursor.
 

@@ -123,13 +123,15 @@ final class HTTPServer {
     private let onNext: (CycleTarget) -> Void
     private let onPrev: (CycleTarget) -> Void
     private let onBlur: () -> Void
+    private let onAutoCycle: () -> Void
     private var listener: NWListener?
 
-    init(port: UInt16, onNext: @escaping (CycleTarget) -> Void, onPrev: @escaping (CycleTarget) -> Void, onBlur: @escaping () -> Void) {
+    init(port: UInt16, onNext: @escaping (CycleTarget) -> Void, onPrev: @escaping (CycleTarget) -> Void, onBlur: @escaping () -> Void, onAutoCycle: @escaping () -> Void) {
         self.port = port
         self.onNext = onNext
         self.onPrev = onPrev
         self.onBlur = onBlur
+        self.onAutoCycle = onAutoCycle
     }
 
     func start() {
@@ -201,7 +203,8 @@ final class HTTPServer {
             case "/next": DispatchQueue.main.async { self.onNext(target) }; (status, body) = ("200 OK", "next\n")
             case "/prev": DispatchQueue.main.async { self.onPrev(target) }; (status, body) = ("200 OK", "prev\n")
             case "/blur": DispatchQueue.main.async { self.onBlur() };       (status, body) = ("200 OK", "blur\n")
-            default:                                                         (status, body) = ("404 Not Found", "endpoints: /next /prev /blur\n")
+            case "/auto-cycle": DispatchQueue.main.async { self.onAutoCycle() }; (status, body) = ("200 OK", "auto-cycle\n")
+            default:                                                         (status, body) = ("404 Not Found", "endpoints: /next /prev /blur /auto-cycle\n")
             }
 
             let msg = "HTTP/1.1 \(status)\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
@@ -528,7 +531,7 @@ struct GeneralSettingsView: View {
                     if let httpPortOverride {
                         Text("PORT=\(String(httpPortOverride)) is set in the environment, so the API runs on that port and these settings apply on the next launch without it.")
                     }
-                    Text("GET /next, /prev, /blur. Add ?current_display=true to /next or /prev to change only the display under the cursor.")
+                    Text("GET /next, /prev, /blur, /auto-cycle. Add ?current_display=true to /next or /prev to change only the display under the cursor.")
                     Text("Listens on all network interfaces, so other devices on your network can reach it.")
                 }
                 .foregroundStyle(.secondary)
@@ -1600,7 +1603,8 @@ class WallpaperController: NSObject, NSMenuDelegate {
                                     let display = target == .currentDisplay ? self.displayUnderCursor() : nil
                                     self.cycleImage(delta: -1, display: display)
                                 },
-                                onBlur: { [weak self] in self?.toggleBlur() })
+                                onBlur: { [weak self] in self?.toggleBlur() },
+                                onAutoCycle: { [weak self] in self?.settings.autoCycle.toggle() })
         // Only the current server may update the status, not one that's
         // being replaced.
         server.onStateChange = { [weak self, weak server] state in
@@ -1672,6 +1676,7 @@ Environment:
                      /next   Show the next image (add ?current_display=true to target only the display under the cursor)
                      /prev   Show the previous image (same query param supported)
                      /blur   Toggle blur
+                     /auto-cycle   Toggle automatic image cycling at the configured interval
 """
 
 if args == ["--version"] || args == ["-v"] {
