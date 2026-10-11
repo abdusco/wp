@@ -239,7 +239,7 @@ let autoCycleIntervals: [(label: String, seconds: TimeInterval)] = [
 // MARK: - Hotkeys
 
 enum HotkeyAction: String, CaseIterable, Codable {
-    case next, prev, nextCurrentDisplay, prevCurrentDisplay, toggleBlur, toggleShuffle
+    case next, prev, nextCurrentDisplay, prevCurrentDisplay, toggleBlur, toggleShuffle, toggleAutoCycle
 
     var title: String {
         switch self {
@@ -249,6 +249,7 @@ enum HotkeyAction: String, CaseIterable, Codable {
         case .prevCurrentDisplay: return "Previous image on display under cursor"
         case .toggleBlur:         return "Toggle blur"
         case .toggleShuffle:      return "Toggle shuffle"
+        case .toggleAutoCycle:    return "Toggle auto cycle"
         }
     }
 
@@ -470,7 +471,7 @@ func makeSettingsTabs(settings: Settings, httpStatus: HTTPStatus, hotkeyState: H
         GeneralSettingsView(settings: settings, httpStatus: httpStatus, httpPortOverride: httpPortOverride)))
     tabs.addTabViewItem(tab("Sources", "folder", height: 400,
         SourcesSettingsView(settings: settings, overridden: sourcesOverridden)))
-    tabs.addTabViewItem(tab("Hotkeys", "keyboard", height: 340,
+    tabs.addTabViewItem(tab("Hotkeys", "keyboard", height: 380,
         HotkeysSettingsView(settings: settings, state: hotkeyState)))
     return tabs
 }
@@ -1544,6 +1545,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
         case .prevCurrentDisplay: cycleImage(delta: -1, display: displayUnderCursor())
         case .toggleBlur:         toggleBlur()
         case .toggleShuffle:      toggleShuffle()
+        case .toggleAutoCycle:    toggleAutoCycle()
         }
     }
 
