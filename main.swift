@@ -963,6 +963,34 @@ class WallpaperController: NSObject, NSMenuDelegate {
         updateImages()
     }
 
+    // Keep each display on a surviving member of its current slide, or the
+    // next available slide in its existing order. Include disconnected displays
+    // so reconnecting cannot bring a removed image back into rotation.
+    private func removeImages(_ urls: Set<URL>) {
+        let removed = urls.intersection(images)
+        guard !removed.isEmpty else { return }
+        for url in removed { fputs("wp: not found: \(url.path)\n", stderr) }
+        images.removeAll { removed.contains($0) }
+        for url in removed { aspects.removeValue(forKey: url) }
+        blurCache = blurCache.filter { $0.key.allSatisfy { !removed.contains($0) } }
+        for display in displays.values {
+            let slides = display.slides
+            var showing: URL?
+            for offset in 0..<slides.count {
+                let slide = slides[(display.imageIndex + offset) % slides.count]
+                if let url = slide.first(where: { !removed.contains($0) }) {
+                    showing = url
+                    break
+                }
+            }
+            display.shuffled.removeAll { removed.contains($0) }
+            rebuildSlides(for: display)
+            display.imageIndex = showing.flatMap { url in
+                display.slides.firstIndex { $0.contains(url) }
+            } ?? 0
+        }
+    }
+
     lazy var ciContext: CIContext = {
         if let device = MTLCreateSystemDefaultDevice() {
             return CIContext(mtlDevice: device)
@@ -1109,7 +1137,17 @@ class WallpaperController: NSObject, NSMenuDelegate {
     }
 
     private func updateImages(_ target: Display? = nil) {
-        let targets = target.map { [$0] } ?? connected
+        var targets = target.map { [$0] } ?? connected
+        // Check before using even a cached blur. Repeat because removing a
+        // slide can expose another missing image; the loop is bounded by the
+        // number of images in the rotation.
+        while true {
+            let missing = Set(targets.flatMap { currentSlide(for: $0) ?? [] }
+                .filter { !FileManager.default.fileExists(atPath: $0.path) })
+            guard !missing.isEmpty else { break }
+            removeImages(missing)
+            targets = connected
+        }
         for display in targets {
             guard let win = display.window else { continue }
             guard let slide = currentSlide(for: display), let url = slide.first else {
@@ -1118,9 +1156,15 @@ class WallpaperController: NSObject, NSMenuDelegate {
             }
 
             if !blurEnabled && slide.count == 1 && !isPortrait(url) {
+                let image = NSImage(contentsOf: url)
+                if image == nil && !FileManager.default.fileExists(atPath: url.path) {
+                    removeImages([url])
+                    updateImages()
+                    return
+                }
                 let layer = win.contentView?.layer
                 layer?.add(fadeTransition(), forKey: "transition")
-                layer?.contents = NSImage(contentsOf: url)
+                layer?.contents = image
                 continue
             }
 
@@ -1138,10 +1182,19 @@ class WallpaperController: NSObject, NSMenuDelegate {
             let size = win.frame.size
             let scale = win.backingScaleFactor
             DispatchQueue.global(qos: .userInitiated).async { [weak self, weak win, weak display] in
-                guard let self,
-                      let img = self.renderSlide(slide, size: size, scale: scale),
-                      let out = blur ? self.blurImage(img, sigma: 200) : img else { return }
+                guard let self else { return }
+                let img = self.renderSlide(slide, size: size, scale: scale)
+                let out = img.flatMap { blur ? self.blurImage($0, sigma: 200) : $0 }
                 DispatchQueue.main.async {
+                    // A file may disappear after the initial check, while the
+                    // background render is reading it.
+                    let missing = Set(slide.filter { !FileManager.default.fileExists(atPath: $0.path) })
+                    if !missing.isEmpty {
+                        self.removeImages(missing)
+                        self.updateImages()
+                        return
+                    }
+                    guard slide.allSatisfy({ self.images.contains($0) }), let out else { return }
                     if blur { self.blurCache[slide] = out }
                     guard let display, self.currentSlide(for: display) == slide else { return }
                     let layer = win?.contentView?.layer
