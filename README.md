@@ -67,7 +67,7 @@ wp --version
 
 Settings are saved between launches.
 
-- **General**: start at login, blur when the screen locks or sleeps, auto cycle and its interval, HTTP API on/off and port.
+- **General**: start at login, blur amount and blur when the screen locks or sleeps, auto cycle and its interval, HTTP API on/off and port.
   Start at login registers `wp.app` as a login item, so move it to `/Applications` first; it's unavailable when running the bare binary.
 - **Sources**: add (with + or by dropping folders from Finder), remove and enable/disable image folders. Changes apply immediately.
 - **Hotkeys**: system-wide shortcuts for next/previous image (all displays or the one under the cursor), blur and shuffle. No Accessibility permission needed. A warning icon means another app, or another action here, already uses that shortcut.

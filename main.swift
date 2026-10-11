@@ -368,6 +368,9 @@ final class Settings: ObservableObject {
     @Published var autoBlurOnLock: Bool {
         didSet { defaults.set(autoBlurOnLock, forKey: "autoBlurOnLock") }
     }
+    @Published var blurAmount: Double {
+        didSet { defaults.set(blurAmount, forKey: "blurAmount") }
+    }
     @Published var autoCycle: Bool {
         didSet { defaults.set(autoCycle, forKey: "autoCycle") }
     }
@@ -392,6 +395,7 @@ final class Settings: ObservableObject {
     init() {
         defaults.register(defaults: [
             "autoBlurOnLock": true,
+            "blurAmount": 50.0,
             "autoCycle": false,
             "autoCycleInterval": 300.0,
             "httpEnabled": false,
@@ -400,6 +404,7 @@ final class Settings: ObservableObject {
         sources = defaults.data(forKey: "sources")
             .flatMap { try? JSONDecoder().decode([Source].self, from: $0) } ?? []
         autoBlurOnLock = defaults.bool(forKey: "autoBlurOnLock")
+        blurAmount = min(100, max(0, defaults.double(forKey: "blurAmount")))
         autoCycle = defaults.bool(forKey: "autoCycle")
         autoCycleInterval = defaults.double(forKey: "autoCycleInterval")
         httpEnabled = defaults.bool(forKey: "httpEnabled")
@@ -461,7 +466,7 @@ func makeSettingsTabs(settings: Settings, httpStatus: HTTPStatus, hotkeyState: H
 
     let tabs = NSTabViewController()
     tabs.tabStyle = .toolbar
-    tabs.addTabViewItem(tab("General", "gearshape", height: 545,
+    tabs.addTabViewItem(tab("General", "gearshape", height: 585,
         GeneralSettingsView(settings: settings, httpStatus: httpStatus, httpPortOverride: httpPortOverride)))
     tabs.addTabViewItem(tab("Sources", "folder", height: 400,
         SourcesSettingsView(settings: settings, overridden: sourcesOverridden)))
@@ -497,7 +502,15 @@ struct GeneralSettingsView: View {
                     Text(error).foregroundStyle(.red)
                 }
             }
-            Section("Lock Screen") {
+            Section("Blur") {
+                LabeledContent("Amount") {
+                    HStack {
+                        Slider(value: $settings.blurAmount, in: 0...100, step: 1)
+                        Text("\(Int(settings.blurAmount))%")
+                            .monospacedDigit()
+                            .frame(width: 40, alignment: .trailing)
+                    }
+                }
                 Toggle("Blur when the screen locks or sleeps", isOn: $settings.autoBlurOnLock)
             }
             Section("Auto Cycle") {
@@ -901,6 +914,7 @@ final class Display {
     let key: String
     var window: NSWindow?
     var imageIndex = 0
+    var renderGeneration = 0
     var shuffled: [URL]
     var slides: [Slide] = []
     var aspect: CGFloat?        // screen aspect the slides were grouped for
@@ -917,6 +931,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
     var displays: [String: Display] = [:]   // persists across disconnects
     var order: [String] = []                 // keys of connected displays, in screen order
     var blurEnabled = false
+    private var blurAmount: Double
     var shuffleEnabled = true
     var blurCache: [Slide: NSImage] = [:]
     var statusItem: NSStatusItem!
@@ -1004,6 +1019,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
     init(images: [URL], settings: Settings, sourcesOverridden: Bool) {
         self.images = images
         self.aspects = readAspects(images)
+        self.blurAmount = settings.blurAmount
         self.settings = settings
         self.sourcesOverridden = sourcesOverridden
         super.init()
@@ -1152,6 +1168,8 @@ class WallpaperController: NSObject, NSMenuDelegate {
             targets = connected
         }
         for display in targets {
+            display.renderGeneration += 1
+            let generation = display.renderGeneration
             guard let win = display.window else { continue }
             guard let slide = currentSlide(for: display), let url = slide.first else {
                 win.contentView?.layer?.contents = nil
@@ -1179,15 +1197,17 @@ class WallpaperController: NSObject, NSMenuDelegate {
             }
 
             // Compositing and blurring are too slow for the main thread.
-            // Rapid next/prev can finish renders out of order, so a result is
-            // dropped if the display has moved on to another slide meanwhile.
+            // Cycling or changing blur can finish renders out of order, so
+            // only the display's latest render may replace its wallpaper.
             let blur = blurEnabled
+            // 50% preserves the original blur strength (sigma 200).
+            let sigma = blurAmount * 4
             let size = win.frame.size
             let scale = win.backingScaleFactor
             DispatchQueue.global(qos: .userInitiated).async { [weak self, weak win, weak display] in
                 guard let self else { return }
                 let img = self.renderSlide(slide, size: size, scale: scale)
-                let out = img.flatMap { blur ? self.blurImage($0, sigma: 200) : $0 }
+                let out = img.flatMap { blur ? self.blurImage($0, sigma: sigma) : $0 }
                 DispatchQueue.main.async {
                     // A file may disappear after the initial check, while the
                     // background render is reading it.
@@ -1198,8 +1218,10 @@ class WallpaperController: NSObject, NSMenuDelegate {
                         return
                     }
                     guard slide.allSatisfy({ self.images.contains($0) }), let out else { return }
+                    guard let display, display.renderGeneration == generation,
+                          self.blurEnabled == blur, !blur || self.blurAmount * 4 == sigma,
+                          self.currentSlide(for: display) == slide else { return }
                     if blur { self.blurCache[slide] = out }
-                    guard let display, self.currentSlide(for: display) == slide else { return }
                     let layer = win?.contentView?.layer
                     layer?.add(self.fadeTransition(), forKey: "transition")
                     layer?.contents = out
@@ -1441,6 +1463,17 @@ class WallpaperController: NSObject, NSMenuDelegate {
     // rather than reading `settings` back. Each sink also fires once on
     // subscribe, which applies the saved settings at launch.
     private func observeSettings() {
+        settings.$blurAmount
+            .removeDuplicates()
+            .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
+            .sink { [weak self] amount in
+                guard let self, self.blurAmount != amount else { return }
+                self.blurAmount = amount
+                self.blurCache.removeAll()
+                if self.blurEnabled { self.updateImages() }
+            }
+            .store(in: &cancellables)
+
         settings.$autoCycle
             .combineLatest(settings.$autoCycleInterval)
             .sink { [weak self] enabled, secs in
