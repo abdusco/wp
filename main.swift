@@ -979,6 +979,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
             rebuildSlides(for: display)
         }
         updateImages()
+        restartAutoCycle()
     }
 
     // Keep each display on a surviving member of its current slide, or the
@@ -1411,7 +1412,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
     @objc func nextImage() { cycleImage(delta:  1, display: nil) }
     @objc func prevImage() { cycleImage(delta: -1, display: nil) }
 
-    func cycleImage(delta: Int, display target: Display?) {
+    func cycleImage(delta: Int, display target: Display?, resetTimer: Bool = true) {
         let targets = target.map { [$0] } ?? connected
         for display in targets {
             let count = display.slides.count
@@ -1419,6 +1420,7 @@ class WallpaperController: NSObject, NSMenuDelegate {
             display.imageIndex = (display.imageIndex + delta + count) % count
         }
         updateImages(target)
+        if resetTimer { restartAutoCycle() }
     }
 
     private func displayUnderCursor() -> Display? {
@@ -1441,12 +1443,18 @@ class WallpaperController: NSObject, NSMenuDelegate {
             display.imageIndex = 0
         }
         updateImages()
+        restartAutoCycle()
+    }
+
+    private func restartAutoCycle() {
+        guard settings.autoCycle else { return }
+        startAutoCycle(every: settings.autoCycleInterval)
     }
 
     private func startAutoCycle(every secs: TimeInterval) {
         autoCycleTimer?.invalidate()
         let timer = Timer(timeInterval: secs, repeats: true) { [weak self] _ in
-            self?.nextImage()
+            self?.cycleImage(delta: 1, display: nil, resetTimer: false)
         }
         RunLoop.main.add(timer, forMode: .common)
         autoCycleTimer = timer
